@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select
+from src.decision.actions import Action
+from src.execution.paper import PaperExecutionEngine
+from src.market.models import Side
+from src.storage.database import Database
+from src.storage.models import EquitySnapshotRow, FillRow, OrderRow, TradeRow
+from src.storage.repository import Repository
+from tests.helpers import make_market_state
+from tests.paper_helpers import execute_action, fresh_account, paper_settings
+from tests.test_storage import POSTGRES_SMOKE_URL, _ok_result
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_open_paper_position(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'paper.db'}")
+    await db.create_all()
+    repo = Repository(db)
+    account = fresh_account()
+    state = make_market_state(price=100.0, bid=100.0, ask=100.10)
+    report = execute_action(Action.OPEN_LONG, account, state, now_ms=1_000_000, decision_id="dec-1")
+    assert report is not None
+    await repo.persist_execution(
+        report=report, now_ms=1_000_000, symbol="ETHUSDT", exchange="binance_usdm"
+    )
+    await repo.save_paper_account(account)
+    await repo.upsert_open_position(
+        account.get_position("ETHUSDT", "binance_usdm"),
+        symbol="ETHUSDT",
+        exchange="binance_usdm",
+        now_ms=1_000_000,
+    )
+    restored = await repo.load_paper_account()
+    await db.aclose()
+    assert restored is not None
+    position = restored.get_position("ETHUSDT", "binance_usdm")
+    assert position is not None
+    assert position.side is Side.LONG
+    assert position.entry_price == pytest.approx(report.opened.entry_price if report.opened else 0)
+    assert position.quantity == pytest.approx(report.opened.quantity if report.opened else 0)
+    assert restored.fees_paid == pytest.approx(account.fees_paid)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_persists_orders_fills_trades_equity(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'paper2.db'}")
+    await db.create_all()
+    repo = Repository(db)
+    account = fresh_account()
+    state = make_market_state(symbol="BTCUSDT", price=100.0, bid=100.0, ask=100.10)
+    opened = execute_action(Action.OPEN_LONG, account, state, now_ms=1, decision_id="o1")
+    assert opened is not None
+    later = make_market_state(symbol="BTCUSDT", price=101.0, bid=101.0, ask=101.10, side=Side.LONG)
+    closed = execute_action(Action.CLOSE, account, later, now_ms=20_000, decision_id="c1")
+    assert closed is not None
+    await repo.persist_execution(report=opened, now_ms=1, symbol="BTCUSDT", exchange="binance_usdm")
+    await repo.persist_execution(
+        report=closed, now_ms=20_000, symbol="BTCUSDT", exchange="binance_usdm"
+    )
+    await repo.save_paper_account(account)
+    await repo.persist_equity_snapshot(account, 20_000)
+    async with db.session() as session:
+        orders = (await session.execute(select(OrderRow))).scalars().all()
+        fills = (await session.execute(select(FillRow))).scalars().all()
+        trades = (await session.execute(select(TradeRow))).scalars().all()
+        equity = (await session.execute(select(EquitySnapshotRow))).scalars().all()
+    assert len(orders) == 2
+    assert len(fills) == 2
+    assert len(trades) == 1
+    assert trades[0].entry_jev_decision_id == "o1"
+    assert trades[0].exit_jev_decision_id == "c1"
+    assert trades[0].fees == pytest.approx(closed.closed.total_fees if closed.closed else 0)
+    assert equity
+    assert await repo.has_orders_for_decision("o1") is True
+    await db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_paper_entities() -> None:
+    db = Database(POSTGRES_SMOKE_URL)
+    try:
+        await db.drop_all()
+        await db.create_all()
+    except Exception as exc:
+        await db.aclose()
+        pytest.skip(f"Postgres in OrbStack is not reachable: {exc}")
+    repo = Repository(db)
+    account = fresh_account()
+    state = make_market_state(symbol="BTCUSDT", price=100.0, bid=100.0, ask=100.10)
+    report = execute_action(
+        Action.OPEN_LONG, account, state, now_ms=1_790_003_765_175, decision_id="pg1"
+    )
+    assert report is not None
+    state_snap = make_market_state(symbol="BTCUSDT", price=100.0, bid=100.0, ask=100.10)
+    await repo.persist_tick(
+        state_snap,
+        _ok_result("BTCUSDT"),
+        candidate_action="OPEN_LONG",
+        final_action="OPEN_LONG",
+    )
+    await repo.persist_execution(
+        report=report, now_ms=1_790_003_765_175, symbol="BTCUSDT", exchange="binance_usdm"
+    )
+    await repo.save_paper_account(account)
+    restored = await repo.load_paper_account()
+    assert restored is not None
+    assert restored.get_position("BTCUSDT", "binance_usdm") is not None
+    await db.drop_all()
+    await db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_persist_does_not_double_open(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'idemp.db'}")
+    await db.create_all()
+    repo = Repository(db)
+    account = fresh_account()
+    state = make_market_state(price=100.0, bid=100.0, ask=100.10)
+    engine = PaperExecutionEngine(paper_settings())
+    from src.decision.actions import ActionSource
+    from src.risk.engine import RiskDecision
+
+    risk = RiskDecision(Action.OPEN_LONG, Action.OPEN_LONG, None, ActionSource.JEV)
+    first = engine.execute(
+        account=account,
+        risk=risk,
+        symbol=state.symbol,
+        exchange=state.exchange,
+        bid=100.0,
+        ask=100.10,
+        now_ms=1,
+        decision_id="once",
+        already_processed=False,
+    )
+    assert first is not None
+    await repo.persist_execution(
+        report=first, now_ms=1, symbol=state.symbol, exchange=state.exchange
+    )
+    assert await repo.has_orders_for_decision("once") is True
+    second = engine.execute(
+        account=account,
+        risk=risk,
+        symbol=state.symbol,
+        exchange=state.exchange,
+        bid=100.0,
+        ask=100.10,
+        now_ms=2,
+        decision_id="once",
+        already_processed=True,
+    )
+    assert second is not None
+    assert second.skipped_duplicate is True
+    assert account.open_position_count == 1
+    await db.aclose()

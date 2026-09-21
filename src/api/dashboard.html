@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jev Trader — PAPER</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #151b2e;
+      --line: #2a3354;
+      --text: #e8edf7;
+      --muted: #93a0c0;
+      --ok: #3dd68c;
+      --warn: #f5c84c;
+      --bad: #ff5d6c;
+      --banner: #7a1020;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .banner {
+      background: var(--banner);
+      color: #fff;
+      text-align: center;
+      font-weight: 800;
+      letter-spacing: .08em;
+      padding: 12px 16px;
+      font-size: 16px;
+      white-space: pre-line;
+    }
+    main { padding: 16px; display: grid; gap: 16px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .12em; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; }
+    .k { color: var(--muted); font-size: 12px; }
+    .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    .empty { color: var(--muted); padding: 8px 0; }
+    .flat { font-size: 18px; font-weight: 800; letter-spacing: .06em; }
+    .error { color: var(--bad); }
+    .best { font-size: 22px; font-weight: 800; letter-spacing: .04em; margin-bottom: 8px; }
+    .hidden { display: none; }
+    .pnl-hero {
+      text-align: center;
+      padding: 28px 20px 32px;
+      border-width: 2px;
+      transition: background .25s ease, border-color .25s ease, color .25s ease, box-shadow .25s ease;
+    }
+    .pnl-kicker {
+      font-size: 12px;
+      letter-spacing: .28em;
+      font-weight: 800;
+      opacity: .75;
+      margin-bottom: 6px;
+    }
+    .pnl-label {
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: .18em;
+      margin-bottom: 8px;
+    }
+    .pnl-amount {
+      font-size: clamp(42px, 8vw, 84px);
+      font-weight: 900;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.05;
+      letter-spacing: .02em;
+    }
+    .pnl-meta {
+      margin-top: 10px;
+      font-size: 18px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      opacity: .9;
+    }
+    .pnl-up {
+      background: linear-gradient(180deg, #0f3d28 0%, #10261c 100%);
+      border-color: #3dd68c;
+      color: #3dd68c;
+      box-shadow: 0 0 40px rgba(61, 214, 140, .28);
+    }
+    .pnl-down {
+      background: linear-gradient(180deg, #4a121c 0%, #2a1016 100%);
+      border-color: #ff5d6c;
+      color: #ff5d6c;
+      box-shadow: 0 0 40px rgba(255, 93, 108, .32);
+    }
+    .pnl-flat {
+      background: var(--panel);
+      border-color: var(--line);
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="banner" id="banner">PAPER TRADING — NO REAL ORDERS — LIVE TRADING DISABLED</div>
+  <main>
+    <section id="pnl-hero" class="pnl-hero pnl-flat">
+      <div class="pnl-kicker">PAPER P&amp;L</div>
+      <div class="pnl-label" id="pnl-label">FLAT</div>
+      <div class="pnl-amount" id="pnl-amount">0.00 USDT</div>
+      <div class="pnl-meta" id="pnl-meta">0.00 bps · 0.000%</div>
+    </section>
+    <section>
+      <h2>SYSTEM STATUS</h2>
+      <div id="system" class="grid">Cargando…</div>
+    </section>
+    <section>
+      <h2>EXPERIMENT</h2>
+      <div id="experiment" class="grid">Cargando…</div>
+    </section>
+    <section id="cost-section">
+      <h2 id="cost-title">PAPER COST MODEL</h2>
+      <div id="cost" class="grid">Cargando…</div>
+    </section>
+    <section id="best-section" class="hidden">
+      <h2>BEST OPPORTUNITY NOW</h2>
+      <div id="best-head" class="best"></div>
+      <div id="best" class="grid"></div>
+    </section>
+    <section id="matrix-section" class="hidden">
+      <h2>OPPORTUNITY MATRIX</h2>
+      <div id="matrix"></div>
+    </section>
+    <section>
+      <h2>LIVE MARKET STATE</h2>
+      <div id="market" class="grid">Cargando…</div>
+    </section>
+    <section>
+      <h2 id="jev-title">JEV CURRENT DECISION</h2>
+      <div id="jev" class="grid">Cargando…</div>
+      <div id="jev-horizons"></div>
+    </section>
+    <section id="dir-term-section" class="hidden">
+      <h2>DIRECTION TERM STRUCTURE</h2>
+      <div id="dir-term"></div>
+    </section>
+    <section id="dir-candle-section" class="hidden">
+      <h2>CURRENT ALIGNED CANDLES</h2>
+      <div id="dir-candles"></div>
+    </section>
+    <section id="dir-persist-section" class="hidden">
+      <h2>PERSISTENCE</h2>
+      <div id="dir-persist" class="grid"></div>
+    </section>
+    <section id="dir-mag-section" class="hidden">
+      <h2>MOVE MAGNITUDE</h2>
+      <div id="dir-mag" class="grid"></div>
+    </section>
+    <section id="dir-regime-section" class="hidden">
+      <h2>REGIME / REVERSAL</h2>
+      <div id="dir-regime" class="grid"></div>
+    </section>
+    <section id="dir-features-section" class="hidden">
+      <h2>FEATURE INSPECTOR</h2>
+      <div id="dir-features"></div>
+    </section>
+    <section id="dir-forecast-section" class="hidden">
+      <h2>FORECAST QUALITY</h2>
+      <div id="dir-forecast"></div>
+    </section>
+    <section>
+      <h2>POSITION</h2>
+      <div id="position">Cargando…</div>
+    </section>
+    <section>
+      <h2>MARK-TO-MARKET ACCOUNT METRICS</h2>
+      <div id="account" class="grid">Cargando…</div>
+    </section>
+    <section id="session-section" class="hidden">
+      <h2>REALIZED TRADE METRICS</h2>
+      <div id="session" class="grid"></div>
+    </section>
+    <section id="latency-section" class="hidden">
+      <h2>LATENCY</h2>
+      <div id="latency" class="grid"></div>
+    </section>
+    <section id="calibration-section" class="hidden">
+      <h2>PREDICTION CALIBRATION</h2>
+      <div id="calibration"></div>
+    </section>
+    <section>
+      <h2>RECENT DECISIONS</h2>
+      <div id="decisions"></div>
+    </section>
+    <section>
+      <h2>RECENT TRADES</h2>
+      <div id="trades"></div>
+    </section>
+    <section>
+      <h2>RECENT SYSTEM EVENTS</h2>
+      <div id="events"></div>
+    </section>
+  </main>
+  <script>
+    const fmt = (value, digits = 4) => {
+      if (value === null || value === undefined || value === "") return "—";
+      if (typeof value === "number" && Number.isFinite(value)) return value.toFixed(digits);
+      return String(value);
+    };
+    const pct = (value) => {
+      if (value === null || value === undefined) return "—";
+      return `${(Number(value) * 100).toFixed(3)}%`;
+    };
+    const ago = (seconds) => {
+      if (seconds === null || seconds === undefined) return "—";
+      return `${Number(seconds).toFixed(1)}s ago`;
+    };
+    const tone = (label) => {
+      const bad = ["ERROR", "STOPPED", "STALE", "BLOCKED"];
+      const warn = ["RECONNECTING", "INCOMPLETE", "WAITING"];
+      const ok = ["CONNECTED", "RUNNING", "HEALTHY", "READY", "PAPER", "SCALP", "DIRECTIONAL"];
+      if (bad.includes(label)) return "bad";
+      if (warn.includes(label)) return "warn";
+      if (ok.includes(label)) return "ok";
+      return "";
+    };
+    const kv = (label, value, cls = "") =>
+      `<div><div class="k">${label}</div><div class="v ${cls}">${value}</div></div>`;
+    const table = (headers, rows, empty) => {
+      if (!rows.length) return `<div class="empty">${empty}</div>`;
+      const head = headers.map((h) => `<th>${h}</th>`).join("");
+      const body = rows.map((row) => `<tr>${row.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("");
+      return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    };
+    const show = (id, visible) => {
+      document.getElementById(id).classList.toggle("hidden", !visible);
+    };
+    async function refresh() {
+      try {
+        const res = await fetch("/api/status", { cache: "no-store" });
+        if (!res.ok) throw new Error("status " + res.status);
+        const data = await res.json();
+        const sys = data.system || {};
+        const safety = data.safety || {};
+        const market = data.market || {};
+        const jev = data.jev_decision;
+        const pos = data.position || {};
+        const acct = data.account || {};
+        const cost = data.cost_model || {};
+        const best = data.best_opportunity;
+        const sess = data.session || {};
+        const lat = data.latency || {};
+        const lastMkt = sys.last_binance_update || {};
+        const lastJev = sys.last_jev_decision || {};
+        const scalp = (sys.strategy || safety.strategy) === "SCALP";
+        const directional = (sys.strategy || safety.strategy) === "DIRECTIONAL";
+        document.getElementById("banner").textContent = (safety.lines || [safety.banner]).join("\n");
+        const pnl = Number(
+          acct.session_net_pnl_usdt != null ? acct.session_net_pnl_usdt : acct.net_pnl
+        );
+        const pnlPct = Number(
+          acct.session_return_pct_on_starting_equity != null
+            ? acct.session_return_pct_on_starting_equity
+            : acct.net_pnl_pct
+        );
+        const pnlBps = Number(
+          acct.session_return_bps_on_starting_equity != null
+            ? acct.session_return_bps_on_starting_equity
+            : acct.net_pnl_bps
+        );
+        const hero = document.getElementById("pnl-hero");
+        if (hero) {
+        hero.classList.remove("pnl-up", "pnl-down", "pnl-flat");
+        const signed = (value, digits) => {
+          if (!Number.isFinite(value)) return "—";
+          const abs = Math.abs(value).toFixed(digits);
+          if (Math.abs(value) < 5 * 10 ** -(digits + 1)) return (0).toFixed(digits);
+          return `${value > 0 ? "+" : "-"}${abs}`;
+        };
+        if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-8) {
+          hero.classList.add("pnl-flat");
+          document.getElementById("pnl-label").textContent = "FLAT";
+          document.getElementById("pnl-amount").textContent = "0.00 USDT";
+        } else if (pnl > 0) {
+          hero.classList.add("pnl-up");
+          document.getElementById("pnl-label").textContent = "PROFIT";
+          document.getElementById("pnl-amount").textContent = `${signed(pnl, 2)} USDT`;
+        } else {
+          hero.classList.add("pnl-down");
+          document.getElementById("pnl-label").textContent = "PÉRDIDA";
+          document.getElementById("pnl-amount").textContent = `${signed(pnl, 2)} USDT`;
+        }
+        document.getElementById("pnl-meta").textContent =
+          `${signed(pnlBps, 2)} bps · ${signed(pnlPct * 100, 3)}%`;
+        }
+        document.getElementById("system").innerHTML = [
+          kv("Trading mode", sys.trading_mode, tone(sys.trading_mode)),
+          kv("Strategy", sys.strategy || "BASELINE", tone(sys.strategy || "")),
+          kv("LIVE", sys.live, "bad"),
+          kv("Exchange", sys.exchange),
+          kv("Symbol", sys.symbol),
+          kv("Configured Jev model", sys.configured_model || sys.jev_model),
+          kv("Resolved Jev model", sys.resolved_response_model || "—"),
+          kv("Engine", sys.engine, tone(sys.engine)),
+          kv("Binance WebSocket", sys.binance_websocket, tone(sys.binance_websocket)),
+          kv("Last Binance update", `${fmt(lastMkt.timestamp, 0)} (${ago(lastMkt.seconds_ago)})`),
+          kv("Jev", sys.jev, tone(sys.jev)),
+          kv("Last Jev decision", `${fmt(lastJev.timestamp, 0)} (${ago(lastJev.seconds_ago)})`),
+          kv("Database", sys.database, tone(sys.database === "CONNECTED" ? "READY" : "ERROR")),
+          kv("Database type", sys.database_type),
+          kv("Warmup", sys.warmup, tone(sys.warmup)),
+          kv("Warmup progress", sys.warmup_progress),
+          kv("Trading allowed", String(sys.trading_allowed)),
+          kv("Blocked reason", sys.blocked_reason || "—"),
+        ].join("");
+        const exp = data.experiment || {};
+        document.getElementById("experiment").innerHTML = [
+          kv("experiment_id", exp.experiment_id || "—"),
+          kv("run_id", exp.run_id || "—"),
+          kv("config_hash", exp.config_hash || "—"),
+          kv("question version", exp.question_version || "—"),
+          kv("strategy version", exp.strategy_version || "—"),
+          kv("feature schema", exp.feature_schema_version || "—"),
+          kv("strategy label", exp.strategy_label || sys.strategy || "—"),
+          kv("CONFIG FROZEN", exp.config_frozen ? "YES" : "NO", exp.config_frozen ? "ok" : "warn"),
+          kv("Action-value reference", exp.action_value_reference || "—"),
+        ].join("");
+        document.getElementById("cost-title").textContent = cost.label || "PAPER COST MODEL";
+        document.getElementById("cost").innerHTML = [
+          kv("Maker fee bps", fmt(cost.maker_fee_bps, 2)),
+          kv("Taker fee bps", fmt(cost.taker_fee_bps, 2)),
+          kv("Slippage bps", fmt(cost.slippage_bps, 2)),
+          kv("Current spread bps", fmt(cost.spread_bps, 2)),
+          kv("Entry half-spread bps", fmt(cost.entry_half_spread_bps, 2)),
+          kv("Expected exit half-spread bps", fmt(cost.expected_exit_half_spread_bps, 2)),
+          kv("Entry leg bps", fmt(cost.entry_leg_cost_bps, 2)),
+          kv("Exit leg bps", fmt(cost.exit_leg_cost_bps, 2)),
+          kv("Est. round-trip bps", fmt(cost.round_trip_cost_bps, 2)),
+          kv("Funding accounting", cost.funding_accounting || "disabled_zero"),
+          kv("Source", cost.source || "—"),
+          kv("Note", cost.assumed ? "Assumed VIP0 Regular USD-M, not live account rates" : "Paper env fees"),
+        ].join("");
+        show("best-section", scalp);
+        show("matrix-section", scalp);
+        show("session-section", scalp || directional);
+        show("latency-section", scalp || directional);
+        show("calibration-section", scalp);
+        show("dir-term-section", directional);
+        show("dir-candle-section", directional);
+        show("dir-persist-section", directional);
+        show("dir-mag-section", directional);
+        show("dir-regime-section", directional);
+        show("dir-features-section", directional);
+        show("dir-forecast-section", directional);
+        if (scalp) {
+          if (!best) {
+            document.getElementById("best-head").textContent = "WAITING";
+            document.getElementById("best").innerHTML = `<div class="empty">Todavía no hay oportunidad SCALP.</div>`;
+          } else {
+            document.getElementById("best-head").textContent = best.note || `${best.side || "FLAT"} ${best.action || ""}`;
+            document.getElementById("best").innerHTML = [
+              kv("SIDE", best.side || "—"),
+              kv("HORIZON", best.horizon_seconds == null ? "—" : `${best.horizon_seconds}s`),
+              kv("TARGET", fmt(best.target_bps, 2) + " bps"),
+              kv("STOP", fmt(best.stop_bps, 2) + " bps"),
+              kv("P TARGET FIRST", fmt(best.p_target != null ? best.p_target : best.p_up, 3)),
+              kv("P STOP FIRST", fmt(best.p_stop != null ? best.p_stop : best.p_down, 3)),
+              kv("P NEITHER", fmt(best.p_neither, 3)),
+              kv("JEV RETURN SCORE", fmt(best.score_raw, 3)),
+              kv("NEITHER RETURN (interpreted bps)", fmt(best.neither_return_bps, 2)),
+              kv("Neither method", best.neither_payoff_method || "—"),
+              kv("GROSS EV", fmt(best.gross_ev_bps, 2) + " bps"),
+              kv("ENTRY COST (round-trip)", fmt(best.cost_bps, 2) + " bps"),
+              kv("ENTRY NET EV", fmt(best.net_ev_bps, 2) + " bps"),
+              kv("Cost-floor bound", String(best.target_bound_by_cost_floor)),
+              kv("Horizon cost constrained", best.horizon_cost_constrained ? "HORIZON_COST_CONSTRAINED" : "no"),
+              kv("ACTION", best.note || best.action || "—"),
+            ].join("");
+          }
+          document.getElementById("matrix").innerHTML = table(
+            ["Horizon", "Long entry EV", "Short entry EV", "Best", "Vol target", "Cost floor", "Final target", "Stop", "Cost floor bound"],
+            (data.opportunity_matrix || []).map((row) => [
+              `${row.horizon_seconds}s`,
+              fmt(row.long_ev, 2),
+              fmt(row.short_ev, 2),
+              fmt(row.best, 0),
+              fmt(row.volatility_target_bps, 2),
+              fmt(row.cost_floor_bps, 2),
+              fmt(row.final_target_bps || row.target_bps, 2),
+              fmt(row.stop_bps, 2),
+              row.horizon_cost_constrained ? "HORIZON_COST_CONSTRAINED" : String(row.target_bound_by_cost_floor),
+            ]),
+            "Sin matriz todavía."
+          );
+          document.getElementById("session").innerHTML = [
+            kv("Runtime s", fmt(sess.runtime_seconds, 0)),
+            kv("Trades", fmt(sess.trades, 0)),
+            kv("Wins", fmt(sess.wins, 0)),
+            kv("Losses", fmt(sess.losses, 0)),
+            kv("Gross PnL", fmt(sess.gross_pnl, 4)),
+            kv("Fees", fmt(sess.fees, 4)),
+            kv("Slippage", fmt(sess.slippage, 4)),
+            kv("Closed-trade net PnL", fmt(sess.net_pnl, 4)),
+            kv("Max drawdown", fmt(sess.max_drawdown, 4)),
+            kv("Turnover", fmt(sess.turnover, 2)),
+            kv("Trades/hour", fmt(sess.trades_per_hour, 2)),
+            kv("Net/hour", fmt(sess.net_pnl_per_hour, 4)),
+            kv("Avg trade", fmt(sess.average_trade_pnl, 4)),
+            kv("Median trade", fmt(sess.median_trade_pnl, 4)),
+            kv("Avg hold s", fmt(sess.average_holding_seconds, 1)),
+            kv("Median hold s", fmt(sess.median_holding_seconds, 1)),
+            kv("Profit factor", fmt(sess.profit_factor, 3)),
+            kv("Win rate", pct(sess.win_rate)),
+            kv("Avg trade return bps (notional)", fmt(sess.average_trade_return_bps_on_notional, 2)),
+            kv("Closed-trade return bps (equity, realized only)", fmt(sess.session_return_bps_on_starting_equity, 2)),
+            kv("LONG expectancy", fmt(sess.long_expectancy, 4)),
+            kv("SHORT expectancy", fmt(sess.short_expectancy, 4)),
+            kv("+EV opportunities", fmt(sess.positive_ev_opportunities, 0)),
+            kv("Rejected by cost/edge", fmt(sess.rejected_cost_opportunities, 0)),
+            kv("Reversals", fmt(sess.reversals, 0)),
+            kv("WS disconnects", fmt(sess.ws_disconnects, 0)),
+            kv("WS recoveries", fmt(sess.ws_recoveries, 0)),
+            kv("Jev failures", fmt(sess.jev_failures, 0)),
+          ].join("");
+          document.getElementById("latency").innerHTML = [
+            kv("Jev p50 ms", fmt(lat.jev_p50_ms, 1)),
+            kv("Jev p95 ms", fmt(lat.jev_p95_ms, 1)),
+            kv("Jev p99 ms", fmt(lat.jev_p99_ms, 1)),
+            kv("PAPER decision-to-fill p50", fmt(lat.paper_decision_to_fill_p50_ms || lat.decision_to_fill_p50_ms, 1)),
+            kv("PAPER decision-to-fill p95", fmt(lat.paper_decision_to_fill_p95_ms || lat.decision_to_fill_p95_ms, 1)),
+            kv("Note", "PAPER fill latency is simulated locally, not Binance execution latency"),
+            kv("Warning", lat.warning || "—", lat.warning ? "warn" : ""),
+          ].join("");
+          const cal = data.calibration || {};
+          const horizons = cal.horizons || {};
+          const calRows = Object.keys(horizons).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+          const raceRows = [];
+          calRows.forEach((key) => {
+            const block = horizons[key];
+            ["long", "short"].forEach((race) => {
+              const row = block[race] || block;
+              raceRows.push({ key, race: race.toUpperCase(), row, block });
+            });
+          });
+          const counts = [
+            kv("Raw predictions N", fmt(cal.n_raw_predictions, 0)),
+            kv("Valid research N", fmt(cal.n_valid_research, 0)),
+          ].join("");
+          if (!raceRows.length) {
+            document.getElementById("calibration").innerHTML = counts + `<div class="empty">INSUFFICIENT DATA</div>`;
+          } else {
+            document.getElementById("calibration").innerHTML = counts + table(
+              ["H", "Race", "raw N", "valid N", "N spaced", "Brier", "TARGET pred/obs", "STOP pred/obs", "NEITHER pred/obs", "EV vs PnL"],
+              raceRows.map(({ key, race, row }) => {
+                if (!row || row.insufficient) {
+                  return [
+                    key,
+                    race,
+                    fmt(row && row.n_raw, 0),
+                    fmt(row && row.n_valid != null ? row.n_valid : row && row.n, 0),
+                    fmt(row && row.n_nonoverlapping, 0),
+                    "INSUFFICIENT DATA",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                  ];
+                }
+                const ev = (row.ev_bins || []).filter((bin) => bin.n > 0).map((bin) =>
+                  `${bin.bin}: pred ${fmt(bin.avg_predicted_ev, 2)} / real ${fmt(bin.avg_realized_pnl, 2)}`
+                ).join("; ") || "—";
+                const target = row.target || row.up || {};
+                const stop = row.stop || row.down || {};
+                const neither = row.neither || {};
+                return [
+                  key,
+                  race,
+                  fmt(row.n_raw, 0),
+                  fmt(row.n_valid != null ? row.n_valid : row.n, 0),
+                  fmt(row.n_nonoverlapping, 0),
+                  fmt(row.brier, 4),
+                  `${fmt(target.predicted_avg, 3)} / ${fmt(target.observed_frequency, 3)}`,
+                  `${fmt(stop.predicted_avg, 3)} / ${fmt(stop.observed_frequency, 3)}`,
+                  `${fmt(neither.predicted_avg, 3)} / ${fmt(neither.observed_frequency, 3)}`,
+                  ev,
+                ];
+              }),
+              "INSUFFICIENT DATA"
+            );
+          }
+        }
+        if (directional) {
+          document.getElementById("session").innerHTML = [
+            kv("Runtime s", fmt(sess.runtime_seconds, 0)),
+            kv("Trades", fmt(sess.trades, 0)),
+            kv("Wins", fmt(sess.wins, 0)),
+            kv("Losses", fmt(sess.losses, 0)),
+            kv("Gross PnL", fmt(sess.gross_pnl, 4)),
+            kv("Fees", fmt(sess.fees, 4)),
+            kv("Slippage", fmt(sess.slippage, 4)),
+            kv("Net PnL", fmt(sess.net_pnl, 4)),
+            kv("Max drawdown", fmt(sess.max_drawdown, 4)),
+            kv("Avg hold s", fmt(sess.average_holding_seconds, 1)),
+            kv("LONG expectancy", fmt(sess.long_expectancy, 4)),
+            kv("SHORT expectancy", fmt(sess.short_expectancy, 4)),
+            kv("WS disconnects", fmt(sess.ws_disconnects, 0)),
+            kv("Jev failures", fmt(sess.jev_failures, 0)),
+          ].join("");
+          document.getElementById("latency").innerHTML = [
+            kv("Jev p50 ms", fmt(lat.jev_p50_ms, 1)),
+            kv("Jev p95 ms", fmt(lat.jev_p95_ms, 1)),
+            kv("PAPER decision-to-fill p50", fmt(lat.paper_decision_to_fill_p50_ms || lat.decision_to_fill_p50_ms, 1)),
+          ].join("");
+        }
+        document.getElementById("market").innerHTML = [
+          kv("BTC price", fmt(market.price, 2)),
+          kv("Best bid", fmt(market.best_bid, 2)),
+          kv("Best ask", fmt(market.best_ask, 2)),
+          kv("Spread bps", fmt(market.spread_bps, 2)),
+          kv("r_5s", fmt(market.r_5s, 6)),
+          kv("r_15s", fmt(market.r_15s, 6)),
+          kv("r_30s", fmt(market.r_30s, 6)),
+          kv("r_1m", fmt(market.r_1m, 6)),
+          kv("r_3m", fmt(market.r_3m, 6)),
+          kv("r_5m", fmt(market.r_5m, 6)),
+          kv("r_15m", fmt(market.r_15m, 6)),
+          kv("r_1h", fmt(market.r_1h, 6)),
+          kv("rv_30s", fmt(market.rv_30s, 6)),
+          kv("rv_1m", fmt(market.rv_1m, 6)),
+          kv("rv_5m", fmt(market.rv_5m, 6)),
+          kv("vol ratio ST/LT", fmt(market.vol_ratio_short_long, 3)),
+          kv("px vs VWAP 1m bps", fmt(market.price_vs_vwap_1m_bps, 2)),
+          kv("px vs VWAP 5m bps", fmt(market.price_vs_vwap_5m_bps, 2)),
+          kv("range pos 1m", fmt(market.range_position_1m, 3)),
+          kv("range pos 5m", fmt(market.range_position_5m, 3)),
+          kv("dist high 1m bps", fmt(market.dist_high_1m_bps, 2)),
+          kv("dist low 1m bps", fmt(market.dist_low_1m_bps, 2)),
+          kv("flow accel 5s-30s", fmt(market.flow_accel_5s_vs_30s, 4)),
+          kv("imbalance 1 Δ", fmt(market.imbalance_1_change, 4)),
+          kv("regime direction", market.regime_direction || "—"),
+          kv("regime volatility", market.regime_volatility || "—"),
+          kv("regime liquidity", market.regime_liquidity || "—"),
+          kv("imbalance 1", fmt(market.book_imbalance_1, 4)),
+          kv("imbalance 5", fmt(market.book_imbalance_5, 4)),
+          kv("imbalance 10", fmt(market.book_imbalance_10, 4)),
+          kv("flow 5s", fmt(market.aggressive_flow_5s, 4)),
+          kv("flow 30s", fmt(market.aggressive_flow_30s, 4)),
+          kv("flow 1m", fmt(market.aggressive_flow_1m, 4)),
+          kv("trade velocity", fmt(market.trade_velocity, 4)),
+        ].join("");
+        document.getElementById("jev-title").textContent = scalp
+          ? "SCALP JEV STATE"
+          : directional
+            ? "DIRECTIONAL JEV STATE"
+            : "JEV CURRENT DECISION";
+        if (!jev) {
+          document.getElementById("jev").innerHTML = `<div class="empty">Todavía no hay decisión de Jev.</div>`;
+          document.getElementById("jev-horizons").innerHTML = "";
+        } else if (directional) {
+          document.getElementById("jev").innerHTML = [
+            kv("Configured model", jev.configured_model || "—"),
+            kv("Resolved model", jev.resolved_response_model || "—"),
+            kv("Consensus", jev.direction_consensus || "—"),
+            kv("Conflict", String(jev.direction_conflict)),
+            kv("Candidate", jev.candidate_action || "—"),
+            kv("Final action", jev.final_action || "—"),
+            kv("Entry reason", jev.entry_reason || "—"),
+            kv("Hold reason", jev.hold_reason || "—"),
+            kv("Close reason", jev.close_reason || "—"),
+            kv("Reverse reason", jev.reverse_reason || "—"),
+            kv("Policy reason", jev.policy_reason || jev.blocked_reason || "—"),
+          ].join("");
+          document.getElementById("jev-horizons").innerHTML = "";
+          const dir = data.directional || {};
+          document.getElementById("dir-term").innerHTML = table(
+            ["H", "P UP", "P DOWN", "side", "realized"],
+            (dir.term_structure || jev.term_structure || []).map((row) => [
+              row.horizon,
+              fmt(row.p_up, 3),
+              fmt(row.p_down, 3),
+              row.side || "—",
+              "—",
+            ]),
+            "Sin term structure todavía."
+          );
+          const candles = dir.active_candles || {};
+          const pCandle = dir.candle_up || jev.candle_up || {};
+          document.getElementById("dir-candles").innerHTML = table(
+            ["TF", "open", "current", "remaining s", "P close UP", "P close DOWN"],
+            ["1m", "5m", "10m", "30m"].map((tf) => {
+              const c = candles[tf] || {};
+              const p = pCandle[tf];
+              return [
+                tf,
+                fmt(c.candle_open, 2),
+                fmt(c.current_mid, 2),
+                fmt(c.remaining_seconds, 0),
+                fmt(p, 3),
+                p == null ? "—" : fmt(1 - Number(p), 3),
+              ];
+            }),
+            "Sin velas alineadas."
+          );
+          const persist = dir.persistence || jev.persistence || {};
+          document.getElementById("dir-persist").innerHTML = [
+            kv("1m P 2 UP", fmt(persist["1m_2_up"], 3)),
+            kv("1m P 3 UP", fmt(persist["1m_3_up"], 3)),
+            kv("1m P 5 UP", fmt(persist["1m_5_up"], 3)),
+            kv("1m P 2 DOWN", fmt(persist["1m_2_down"], 3)),
+            kv("1m P 3 DOWN", fmt(persist["1m_3_down"], 3)),
+            kv("1m P 5 DOWN", fmt(persist["1m_5_down"], 3)),
+            kv("5m P 2 UP", fmt(persist["5m_2_up"], 3)),
+            kv("5m P 3 UP", fmt(persist["5m_3_up"], 3)),
+            kv("5m P 2 DOWN", fmt(persist["5m_2_down"], 3)),
+            kv("5m P 3 DOWN", fmt(persist["5m_3_down"], 3)),
+          ].join("");
+          const mag = dir.magnitude || jev.magnitude || {};
+          document.getElementById("dir-mag").innerHTML = ["1m", "5m", "10m", "30m"].map((tf) => {
+            const row = mag[tf] || {};
+            return kv(tf, row.choice || "—");
+          }).join("");
+          const diag = dir.diagnostics || jev.diagnostics || {};
+          const regime = dir.regime || {};
+          document.getElementById("dir-regime").innerHTML = [
+            kv("direction", regime.direction || "—"),
+            kv("volatility", regime.volatility || "—"),
+            kv("liquidity", regime.liquidity || "—"),
+            kv("character", diag.market_character || "—"),
+            kv("momentum strengthening", fmt(diag.momentum_strengthening, 3)),
+            kv("momentum weakening", fmt(diag.momentum_weakening, 3)),
+            kv("reversal 60s", fmt(diag.reversal_60s, 3)),
+            kv("UTC hour", fmt(regime.utc_hour, 0)),
+            kv("weekend", String(regime.weekend)),
+          ].join("");
+          const inspector = dir.inspector || {};
+          document.getElementById("dir-features").innerHTML = Object.keys(inspector).map((group) => {
+            const body = inspector[group];
+            const keys = body && typeof body === "object" ? Object.keys(body) : [];
+            return `<div><div class="k">${group}</div><div class="v">${keys.join(", ") || "—"}</div></div>`;
+          }).join("") || `<div class="empty">Sin features todavía.</div>`;
+          const fq = dir.forecast_quality || data.calibration || {};
+          const hz = fq.horizons || {};
+          document.getElementById("dir-forecast").innerHTML = table(
+            ["H", "N", "N spaced", "Brier", "log loss", "accuracy"],
+            Object.keys(hz).map((key) => {
+              const row = hz[key] || {};
+              return [
+                key,
+                fmt(row.n, 0),
+                fmt(row.n_nonoverlapping, 0),
+                fmt(row.brier, 4),
+                fmt(row.log_loss, 4),
+                fmt(row.accuracy, 3),
+              ];
+            }),
+            "INSUFFICIENT DATA"
+          );
+        } else if (scalp) {
+          document.getElementById("jev").innerHTML = [
+            kv("Configured model", jev.configured_model || "—"),
+            kv("Resolved model", jev.resolved_response_model || "—"),
+            kv("Noise", fmt(jev.noise, 3)),
+            kv("Candidate action", jev.candidate_action || "—"),
+            kv("Final action", jev.final_action || "—"),
+            kv("Recommended action", jev.recommended_action || "—"),
+            kv("Action reason", jev.policy_reason || jev.blocked_reason || "—"),
+            kv("ENTRY NET EV if flat (diagnostic)", fmt(jev.entry_net_ev_if_flat_bps, 2)),
+            kv("HOLD VALUE FROM NOW", fmt(jev.hold_value_bps != null ? jev.hold_value_bps : jev.hold_net_ev_bps, 2)),
+            kv("CLOSE VALUE FROM NOW", fmt(jev.close_value_bps != null ? jev.close_value_bps : jev.close_now_value_bps, 2)),
+            kv("REVERSE VALUE FROM NOW", fmt(jev.reverse_value_bps != null ? jev.reverse_value_bps : jev.reverse_net_ev_bps, 2)),
+            kv("Chosen action", jev.chosen_action || jev.recommended_action || "—"),
+            kv("Action margin bps", fmt(jev.action_margin_bps, 2)),
+            kv("HOLD advantage vs close", fmt(jev.hold_advantage_bps, 2)),
+            kv("Score mapping", jev.score_mapping_version || "—"),
+            kv("Trading allowed", String(jev.trading_allowed)),
+          ].join("");
+          document.getElementById("jev-horizons").innerHTML = table(
+            ["H", "pL tgt", "pL stop", "pL neither", "pS tgt", "pS stop", "pS neither", "target", "stop", "gross L", "gross S", "entry net L", "entry net S"],
+            (jev.horizons || []).map((row) => [
+              `${row.horizon_seconds}s`,
+              fmt(row.p_long_target, 3),
+              fmt(row.p_long_stop, 3),
+              fmt(row.p_long_neither, 3),
+              fmt(row.p_short_target, 3),
+              fmt(row.p_short_stop, 3),
+              fmt(row.p_short_neither, 3),
+              fmt(row.target_bps, 2),
+              fmt(row.stop_bps, 2),
+              fmt(row.long_gross_ev_bps, 2),
+              fmt(row.short_gross_ev_bps, 2),
+              fmt(row.long_entry_net_ev_bps, 2),
+              fmt(row.short_entry_net_ev_bps, 2),
+            ]),
+            "Todavía no hay horizontes SCALP."
+          );
+        } else {
+          document.getElementById("jev-horizons").innerHTML = "";
+          document.getElementById("jev").innerHTML = [
+            kv("Desired exposure", jev.desired_exposure || "—"),
+            kv("Long probability", fmt(jev.long_probability, 3)),
+            kv("Short probability", fmt(jev.short_probability, 3)),
+            kv("Evidence", fmt(jev.evidence, 3)),
+            kv("Noise", fmt(jev.noise, 3)),
+            kv("Continuation", fmt(jev.continuation, 3)),
+            kv("Reversal", fmt(jev.reversal, 3)),
+            kv("Exhaustion", fmt(jev.exhaustion, 3)),
+            kv("Candidate action", jev.candidate_action || "—"),
+            kv("Final action", jev.final_action || "—"),
+            kv("Trading allowed", String(jev.trading_allowed)),
+            kv("Blocked reason", jev.blocked_reason || "—"),
+          ].join("");
+        }
+        if (!pos.open) {
+          document.getElementById("position").innerHTML = `<div class="flat">NO OPEN POSITION</div>`;
+        } else {
+          document.getElementById("position").innerHTML = `<div class="grid">${[
+            kv("Current position", pos.side),
+            kv("Quantity", fmt(pos.quantity, 6)),
+            kv("Entry price", fmt(pos.entry_price, 2)),
+            kv("Current executable mark", fmt(pos.current_executable_mark, 2)),
+            kv("Notional", fmt(pos.notional, 2)),
+            kv("Position age", fmt(pos.age_seconds, 0) + "s"),
+            kv("Unrealized PnL", fmt(pos.unrealized_pnl, 4)),
+            kv("Unrealized PnL bps", fmt(pos.unrealized_pnl_bps, 2)),
+            kv("MFE bps", fmt(pos.mfe_bps, 2)),
+            kv("MAE bps", fmt(pos.mae_bps, 2)),
+            kv("Profit giveback bps", fmt(pos.profit_giveback_bps, 2)),
+            kv("Entry fee", fmt(pos.fees_paid, 4)),
+            kv("HOLD VALUE FROM NOW", fmt(pos.hold_value_bps != null ? pos.hold_value_bps : pos.hold_net_ev_bps, 2)),
+            kv("CLOSE VALUE FROM NOW", fmt(pos.close_value_bps != null ? pos.close_value_bps : pos.close_now_value_bps, 2)),
+            kv("REVERSE VALUE FROM NOW", fmt(pos.reverse_value_bps != null ? pos.reverse_value_bps : pos.reverse_net_ev_bps, 2)),
+            kv("Chosen action", pos.chosen_action || pos.recommended_action || "—"),
+            kv("Action margin bps", fmt(pos.action_margin_bps, 2)),
+            kv("Recommended action", pos.recommended_action || "—"),
+          ].join("")}</div>`;
+        }
+        document.getElementById("account").innerHTML = [
+          kv("Starting balance", fmt(acct.starting_balance, 2)),
+          kv("Current equity", fmt(acct.equity, 2)),
+          kv("Position notional", fmt(acct.position_notional, 2)),
+          kv("Exposure %", pct(acct.exposure_pct)),
+          kv("Realized PnL", fmt(acct.realized_pnl, 4)),
+          kv("Unrealized PnL", fmt(acct.unrealized_pnl, 4)),
+          kv("Fees", fmt(acct.fees, 4)),
+          kv(
+            "MTM net PnL (incl. open)",
+            fmt(pnl, 4),
+            pnl > 1e-8 ? "ok" : pnl < -1e-8 ? "bad" : ""
+          ),
+          kv("MTM return % (equity, incl. open)", pct(acct.session_return_pct_on_starting_equity != null ? acct.session_return_pct_on_starting_equity : acct.net_pnl_pct)),
+          kv("MTM return bps (equity, incl. open)", fmt(acct.session_return_bps_on_starting_equity != null ? acct.session_return_bps_on_starting_equity : acct.net_pnl_bps, 2)),
+          kv("Peak equity", fmt(acct.peak_equity, 2)),
+          kv("Drawdown", fmt(acct.drawdown, 4)),
+          kv("Drawdown %", fmt((acct.drawdown_pct || 0) * 100, 3) + "%"),
+        ].join("");
+        document.getElementById("decisions").innerHTML = table(
+          scalp
+            ? ["time", "side", "H", "net EV", "candidate", "final", "blocked", "jev ms"]
+            : ["time", "exposure", "long", "short", "evidence", "noise", "candidate", "final", "blocked"],
+          (data.recent_decisions || []).map((row) => scalp ? [
+            fmt(row.timestamp, 0),
+            fmt(row.best_side, 0),
+            fmt(row.best_horizon_seconds, 0),
+            fmt(row.net_ev_bps, 2),
+            fmt(row.candidate_action, 0),
+            fmt(row.final_action, 0),
+            fmt(row.blocked_reason, 0),
+            fmt(row.jev_latency_ms, 0),
+          ] : [
+            fmt(row.timestamp, 0),
+            fmt(row.desired_exposure, 0),
+            fmt(row.long_probability, 3),
+            fmt(row.short_probability, 3),
+            fmt(row.evidence, 3),
+            fmt(row.noise, 3),
+            fmt(row.candidate_action, 0),
+            fmt(row.final_action, 0),
+            fmt(row.blocked_reason, 0),
+          ]),
+          "Todavía no hay decisiones."
+        );
+        const trades = data.recent_trades || [];
+        document.getElementById("trades").innerHTML = table(
+          ["entry", "exit", "side", "hold s", "notional", "gross", "fees", "entry slip", "exit slip", "spread", "net USDT", "trade bps", "MFE", "MAE", "H", "entry EV", "exit reason"],
+          trades.map((row) => [
+            fmt(row.entry_time, 0),
+            fmt(row.exit_time, 0),
+            fmt(row.side, 0),
+            fmt(row.holding_seconds, 1),
+            fmt(row.notional, 2),
+            fmt(row.gross_pnl, 4),
+            fmt(row.fees, 4),
+            fmt(row.entry_slippage, 4),
+            fmt(row.exit_slippage, 4),
+            fmt(row.total_spread, 4),
+            fmt(row.trade_net_pnl_usdt != null ? row.trade_net_pnl_usdt : row.net_pnl, 4),
+            fmt(row.trade_net_return_bps_on_notional != null ? row.trade_net_return_bps_on_notional : row.net_bps, 2),
+            fmt(row.mfe_bps, 2),
+            fmt(row.mae_bps, 2),
+            fmt(row.entry_horizon_seconds, 0),
+            fmt(row.entry_net_ev_bps, 2),
+            fmt(row.exit_reason, 0),
+          ]),
+          "No paper trades yet."
+        );
+        document.getElementById("events").innerHTML = table(
+          ["time", "level", "event", "symbol"],
+          (data.recent_events || []).map((row) => [
+            fmt(row.timestamp, 0),
+            fmt(row.level, 0),
+            fmt(row.event_type, 0),
+            fmt(row.symbol, 0),
+          ]),
+          "Sin eventos todavía."
+        );
+      } catch (err) {
+        document.getElementById("system").innerHTML =
+          `<div class="error">No se pudo leer /api/status: ${err}</div>`;
+      }
+    }
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>
