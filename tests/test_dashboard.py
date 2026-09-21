@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -39,6 +40,10 @@ async def test_operator_status_hides_secrets_and_shows_paper(tmp_path: Path) -> 
     assert payload["position"]["side"] == Side.FLAT.value
     assert payload["position"]["open"] is False
     assert payload["recent_trades"] == []
+    assert payload["system"]["engine"] == "RUNNING"
+    assert payload["system"]["strategy_running"] is True
+    assert payload["system"]["can_start"] is False
+    assert payload["system"]["can_stop"] is True
     await engine.db.aclose()
 
 
@@ -72,6 +77,11 @@ async def test_dashboard_and_health_routes(tmp_path: Path) -> None:
         assert "Valid research N" in page.text
         assert "BEST OPPORTUNITY NOW" in page.text
         assert "OPPORTUNITY MATRIX" in page.text
+        assert "CONTROL DE ESTRATEGIA" in page.text
+        assert "Encender" in page.text
+        assert "Parar" in page.text
+        assert "/api/strategy/start" in page.text
+        assert "/api/strategy/stop" in page.text
         root = await client.get("/")
         assert root.status_code == 200
         health = await client.get("/health")
@@ -81,4 +91,64 @@ async def test_dashboard_and_health_routes(tmp_path: Path) -> None:
         status = await client.get("/api/status")
         assert status.status_code == 200
         assert "sk-secret-must-not-leak" not in status.text
+        system = status.json()["system"]
+        assert system["engine"] == "STOPPED"
+        assert system["can_start"] is True
+        assert system["can_stop"] is False
+        assert system["strategy_running"] is False
+    await engine.db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_strategy_start_stop_routes_without_binance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+    await engine.db.create_all()
+
+    async def fake_session() -> None:
+        engine.lifecycle = "RUNNING"
+        try:
+            await engine._stop.wait()
+        finally:
+            engine.lifecycle = "STOPPED"
+            engine._strategy_task = None
+
+    monkeypatch.setattr(engine, "_strategy_session", fake_session)
+    app = create_app(engine)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        idle = await client.post("/api/strategy/stop")
+        assert idle.status_code == 200
+        assert idle.json()["detail"] == "already_stopped"
+
+        started = await client.post("/api/strategy/start")
+        assert started.status_code == 200
+        assert started.json()["ok"] is True
+        assert started.json()["engine"] == "STARTING"
+
+        system = {"engine": "STARTING"}
+        for _ in range(50):
+            system = (await client.get("/api/status")).json()["system"]
+            if system["engine"] == "RUNNING":
+                break
+            await asyncio.sleep(0.02)
+        assert system["engine"] == "RUNNING"
+        assert system["can_start"] is False
+        assert system["can_stop"] is True
+        assert system["strategy_running"] is True
+
+        again = await client.post("/api/strategy/start")
+        assert again.status_code == 200
+        assert again.json()["changed"] is False
+        assert again.json()["detail"] == "already_running"
+
+        stopped = await client.post("/api/strategy/stop")
+        assert stopped.status_code == 200
+        assert stopped.json()["engine"] == "STOPPED"
+        after = (await client.get("/api/status")).json()["system"]
+        assert after["engine"] == "STOPPED"
+        assert after["can_start"] is True
+        assert after["can_stop"] is False
+        assert after["strategy_running"] is False
     await engine.db.aclose()

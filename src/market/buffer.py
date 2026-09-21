@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 
 Clock = Callable[[], int]
 
+# Seeded OHLC mids must outlive the live-mid window so r_1h lookback exists.
+SEEDED_PRICE_CONTEXT_MS = 2 * 60 * 60 * 1000 + 10 * 60 * 1000
+
 
 def wall_clock_ms() -> int:
     return int(time.time() * 1000)
@@ -148,10 +151,15 @@ class MarketBuffer:
         return [trade for trade in self.trades if trade.ts_ms >= cutoff]
 
     def _evict(self, now_ms: int) -> None:
-        cutoff = now_ms - self.history_ms
-        while self.mids and self.mids[0].ts_ms < cutoff:
-            self.mids.popleft()
-        while self.trades and self.trades[0].ts_ms < cutoff:
+        live_cutoff = now_ms - self.history_ms
+        seeded_cutoff = now_ms - max(self.history_ms, SEEDED_PRICE_CONTEXT_MS)
+        kept: deque[MidSample] = deque()
+        for sample in self.mids:
+            cutoff = seeded_cutoff if sample.seeded else live_cutoff
+            if sample.ts_ms >= cutoff:
+                kept.append(sample)
+        self.mids = kept
+        while self.trades and self.trades[0].ts_ms < live_cutoff:
             self.trades.popleft()
-        while self.open_interest and self.open_interest[0].ts_ms < cutoff:
+        while self.open_interest and self.open_interest[0].ts_ms < live_cutoff:
             self.open_interest.popleft()

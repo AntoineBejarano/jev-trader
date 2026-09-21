@@ -15,6 +15,7 @@ from src.storage.models import DirectionalForecastRow, ExperimentRunRow, SystemE
 from src.storage.repository import (
     Repository,
     _closed_from_row,
+    _directional_row_valid,
     summarize_directional_calibration,
 )
 
@@ -32,7 +33,9 @@ def render_report(payload: dict[str, Any]) -> str:
         f"jev_configured={payload['jev_configured']}",
         f"jev_resolved={payload['jev_resolved']}",
         "",
-        f"forecasts={payload['forecasts']}",
+        f"forecasts_raw={payload['forecasts']}",
+        f"forecasts_valid={payload.get('valid_forecasts')}",
+        f"forecasts_nonoverlapping_valid={payload.get('n_nonoverlapping_valid')}",
         f"mature_rolling={payload['mature_rolling']}",
         f"paper_trades={payload['trades']}",
         f"gross_pnl={_fmt(payload['gross_pnl'])}",
@@ -171,12 +174,13 @@ def build_report_payload(
         starting_balance=equity,
         position_notional=notional,
     )
+    official = [row for row in forecasts if _directional_row_valid(row)]
     calibration = summarize_directional_calibration(forecasts)
     fp = run.fingerprint if isinstance(run.fingerprint, dict) else {}
-    correct, wrong, disagree = _high_confidence(forecasts)
+    correct, wrong, disagree = _high_confidence(official)
     mature = sum(
         1
-        for row in forecasts
+        for row in official
         if isinstance(row.rolling_outcomes, dict) and row.rolling_outcomes
     )
     return {
@@ -192,6 +196,7 @@ def build_report_payload(
         "jev_configured": fp.get("jev_configured_model"),
         "jev_resolved": fp.get("jev_resolved_model"),
         "forecasts": len(forecasts),
+        "valid_forecasts": len(official),
         "mature_rolling": mature,
         "trades": metrics["trades"],
         "gross_pnl": metrics["gross_pnl"],
@@ -202,11 +207,14 @@ def build_report_payload(
         "candles": calibration.get("candles") or {},
         "persistence": calibration.get("persistence") or {},
         "magnitude": calibration.get("magnitude") or {},
-        "counterfactual": _cf_summary(forecasts),
+        "counterfactual": _cf_summary(official),
         "high_confidence_correct": correct,
         "high_confidence_wrong": wrong,
         "jev_vs_momentum": disagree,
         "events": len(events),
+        "n_raw_predictions": calibration.get("n_raw_predictions"),
+        "n_valid_research": calibration.get("n_valid_research"),
+        "n_nonoverlapping_valid": calibration.get("n_nonoverlapping_valid"),
     }
 
 
@@ -246,7 +254,11 @@ async def async_main(argv: list[str] | None = None) -> int:
         payload = await collect_report(
             repo,
             run_id=args.run_id,
-            experiment_id=None if args.current else args.experiment_id,
+            experiment_id=(
+                settings.experiment_id
+                if args.current and not args.run_id
+                else args.experiment_id
+            ),
         )
     finally:
         await db.aclose()

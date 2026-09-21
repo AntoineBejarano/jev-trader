@@ -12,7 +12,7 @@ from src.jev.models import (
     ParsedJevDecision,
     QuestionMode,
 )
-from src.storage.database import Database, async_database_url
+from src.storage.database import Database, async_database_url, postgres_requires_ssl
 from src.storage.hashing import market_state_hash
 from src.storage.models import JevDecisionRow, MarketSnapshotRow, SystemEventRow
 from src.storage.repository import Repository
@@ -49,6 +49,16 @@ def _ok_result(symbol: str = "ETHUSDT") -> JevCallResult:
 def test_async_url_normalization() -> None:
     assert async_database_url("sqlite:///./jev_trader.db").startswith("sqlite+aiosqlite://")
     assert async_database_url("postgresql://u:p@localhost/db").startswith("postgresql+asyncpg://")
+    railway = async_database_url(
+        "postgres://u:p@maglev.proxy.rlwy.net:1234/railway?sslmode=require&channel_binding=require"
+    )
+    assert railway.startswith("postgresql+asyncpg://")
+    assert "sslmode" not in railway
+    assert "channel_binding" not in railway
+    assert postgres_requires_ssl(
+        "postgresql://u:p@maglev.proxy.rlwy.net:1234/railway?sslmode=require"
+    )
+    assert not postgres_requires_ssl("postgresql://jev:jev@postgres.railway.internal:5432/railway")
 
 
 @pytest.mark.asyncio

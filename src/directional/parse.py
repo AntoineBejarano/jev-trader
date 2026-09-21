@@ -3,7 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 from src.directional.constants import MAGNITUDE_BUCKETS
-from src.directional.questions import QUESTION_SET_VERSION, directional_required_keys
+from src.directional.questions import (
+    CANDLE_DIRECTION_QUESTIONS,
+    QUESTION_SET_VERSION,
+    ROLLING_DIRECTION_QUESTIONS,
+    directional_questions,
+    directional_required_keys,
+)
 from src.jev.models import (
     ChoiceAnswer,
     DecisionsResponse,
@@ -44,13 +50,58 @@ def _bucket(
     return {"choice": selected, "probabilities": probs}
 
 
+def _raw_noul(
+    answers: dict[str, NoulAnswer | ChoiceAnswer | ScoreAnswer], key: str
+) -> float | None:
+    answer = answers.get(key)
+    if isinstance(answer, NoulAnswer):
+        return float(answer.noul)
+    return None
+
+
+def _answer_audit(response: DecisionsResponse) -> list[dict[str, Any]]:
+    """Per-question debug rows. Each key is read independently; never reused."""
+    questions = directional_questions()
+    rows: list[dict[str, Any]] = []
+    for key, horizon, seconds in ROLLING_DIRECTION_QUESTIONS:
+        question = questions[key]
+        raw = _raw_noul(response.answers, key)
+        parsed = 0.5 if raw is None else min(1.0, max(0.0, raw))
+        rows.append(
+            {
+                "question_id": key,
+                "family": "rolling_direction",
+                "horizon": horizon,
+                "horizon_seconds": seconds,
+                "question_text": question.get("instructions"),
+                "raw_jev_value": raw,
+                "parsed_probability": parsed,
+            }
+        )
+    for key, horizon in CANDLE_DIRECTION_QUESTIONS:
+        question = questions[key]
+        raw = _raw_noul(response.answers, key)
+        parsed = 0.5 if raw is None else min(1.0, max(0.0, raw))
+        rows.append(
+            {
+                "question_id": key,
+                "family": "aligned_candle",
+                "horizon": horizon,
+                "horizon_seconds": None,
+                "question_text": question.get("instructions"),
+                "raw_jev_value": raw,
+                "parsed_probability": parsed,
+            }
+        )
+    return rows
+
+
 def parse_directional_forecast(response: DecisionsResponse) -> dict[str, Any]:
     answers = response.answers
+    # Independent key reads. Do not copy one noul onto another horizon.
     p_up = {
-        "1m": _p(answers, "up_60s"),
-        "5m": _p(answers, "up_300s"),
-        "10m": _p(answers, "up_600s"),
-        "30m": _p(answers, "up_1800s"),
+        label: _p(answers, key)
+        for key, label, _seconds in ROLLING_DIRECTION_QUESTIONS
     }
     warnings: list[str] = []
     persist = {
@@ -92,7 +143,7 @@ def parse_directional_forecast(response: DecisionsResponse) -> dict[str, Any]:
                 "p_down": 1.0 - p_up[label],
                 "side": sides[label],
             }
-            for label, seconds in (("1m", 60), ("5m", 300), ("10m", 600), ("30m", 1800))
+            for _key, label, seconds in ROLLING_DIRECTION_QUESTIONS
         ],
         "magnitude": {
             "1m": _bucket(answers, "move_60s"),
@@ -101,10 +152,7 @@ def parse_directional_forecast(response: DecisionsResponse) -> dict[str, Any]:
             "30m": _bucket(answers, "move_1800s"),
         },
         "candle_up": {
-            "1m": _p(answers, "candle_up_1m"),
-            "5m": _p(answers, "candle_up_5m"),
-            "10m": _p(answers, "candle_up_10m"),
-            "30m": _p(answers, "candle_up_30m"),
+            label: _p(answers, key) for key, label in CANDLE_DIRECTION_QUESTIONS
         },
         "persistence": persist,
         "diagnostics": {
@@ -116,6 +164,7 @@ def parse_directional_forecast(response: DecisionsResponse) -> dict[str, Any]:
         "direction_consensus": consensus,
         "direction_conflict": consensus == "MIXED",
         "probability_consistency_warnings": warnings,
+        "answer_audit": _answer_audit(response),
     }
 
 

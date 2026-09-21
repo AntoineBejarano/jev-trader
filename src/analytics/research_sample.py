@@ -14,10 +14,9 @@ def research_sample_status(
 ) -> tuple[bool, str | None]:
     """Official calibration gate. Raw predictions are still persisted.
 
-    r_15m / r_1h are intended Jev context and are bootstrapped from public
-    USD-M klines. Their absence after a failed bootstrap does not invalidate
-    a sample; warmup, stale market, missing executable context, and Jev
-    failure do.
+    DIRECTIONAL additionally rejects samples when required state fields
+    (including r_15m / r_1h) are missing. Those returns are bootstrapped
+    from public USD-M klines so they are available immediately.
     """
     if result.status is not JevCallStatus.OK:
         return False, INVALID_JEV

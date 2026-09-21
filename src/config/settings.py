@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from enum import StrEnum
 from functools import lru_cache
 from typing import Self
@@ -48,7 +49,10 @@ class Settings(BaseSettings):
     binance_ws_public_base: str = "wss://fstream.binance.com/public"
     binance_ws_market_base: str = "wss://fstream.binance.com/market"
 
-    database_url: str = "sqlite:///./jev_trader.db"
+    database_url: str = Field(
+        default="sqlite:///./jev_trader.db",
+        validation_alias=AliasChoices("DATABASE_URL", "DATABASE_PRIVATE_URL", "database_url"),
+    )
 
     trading_mode: TradingMode = TradingMode.SHADOW
     trading_strategy: TradingStrategy = TradingStrategy.BASELINE
@@ -131,6 +135,20 @@ class Settings(BaseSettings):
     dir_exit_opposite_confidence: float = 0.65
     dir_reverse_confidence: float = 0.75
     dir_confirmations_required: int = 2
+    dir_hold_floor: float = 0.55
+    dir_close_thesis_floor: float = 0.50
+    dir_thesis_decay_close: float = 0.20
+    dir_reverse_margin: float = 0.10
+    dir_reverse_confirmations: int = 2
+    dir_close_confirmations: int = 2
+    dir_support_confidence: float = 0.62
+    dir_horizon_weight_primary: float = 1.0
+    dir_horizon_weight_support: float = 0.55
+    dir_horizon_weight_context: float = 0.20
+    dir_reversal_risk_close: float = 0.60
+    dir_momentum_weakening_close: float = 0.60
+    dir_giveback_context_bps: float = 8.0
+    dir_stale_horizon_multiple: float = 3.0
 
     experiment_id: str = "scalp-v3-calibration"
     experiment_frozen: bool = False
@@ -183,6 +201,12 @@ class Settings(BaseSettings):
         if not symbols:
             raise ValueError("TRADING_SYMBOLS must contain at least one symbol")
         return ",".join(symbols)
+
+    @model_validator(mode="after")
+    def bind_public_interface_on_railway(self) -> Self:
+        if os.getenv("RAILWAY_ENVIRONMENT") and self.dashboard_host == "127.0.0.1":
+            self.dashboard_host = "0.0.0.0"
+        return self
 
     @model_validator(mode="after")
     def refuse_unconfirmed_live(self) -> Self:

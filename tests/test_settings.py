@@ -42,6 +42,14 @@ def test_legacy_exchange_env_name_is_accepted(monkeypatch: pytest.MonkeyPatch) -
     assert settings.trading_exchange == "binance_usdm"
 
 
+def test_railway_binds_all_interfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.delenv("DASHBOARD_HOST", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.dashboard_host == "0.0.0.0"
+
+
 def test_paper_fee_and_host_aliases_match_existing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PAPER_TAKER_FEE_BPS", "4")
     monkeypatch.setenv("PAPER_MAKER_FEE_BPS", "2")

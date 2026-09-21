@@ -8,6 +8,7 @@ from src.config.settings import TradingStrategy
 from src.decision.action_values import ACTION_VALUE_REFERENCE
 from src.decision.ev import opportunity_matrix
 from src.directional.constants import STRATEGY_LABEL
+from src.directional.coverage import feature_coverage
 from src.directional.serialize import compact_inspector
 from src.experiment.fingerprint import (
     active_feature_schema_version,
@@ -16,6 +17,7 @@ from src.experiment.fingerprint import (
 )
 from src.jev.models import JevCallStatus
 from src.market.models import PRIMARY_WARMUP_MS, MarketState, Side
+from src.portfolio.account import ClosedTrade
 from src.storage.database import database_kind
 
 if TYPE_CHECKING:
@@ -72,8 +74,8 @@ def _jev_health(engine: TraderEngine) -> str:
 def _warmup(engine: TraderEngine, now_ms: int, state: MarketState | None) -> tuple[str, str]:
     symbol = engine.settings.symbols[0]
     runtime = engine.adapter.runtime(symbol)
-    timestamps, _values = runtime.buffer.mids_as_lists()
-    elapsed = 0 if not timestamps else max(0, now_ms - timestamps[0])
+    live = runtime.buffer.live_mids()
+    elapsed = 0 if not live else max(0, now_ms - live[0].ts_ms)
     elapsed = min(elapsed, PRIMARY_WARMUP_MS)
     ready = bool(state is not None and state.health.warmup_ready)
     label = "READY" if ready else "INCOMPLETE"
@@ -198,12 +200,25 @@ def _jev_view(engine: TraderEngine, state: MarketState | None) -> dict[str, Any]
                     "probability_consistency_warnings"
                 )
                 or [],
+                "answer_audit": forecast.get("answer_audit") or [],
+                "research_sample_valid": forecast.get("research_sample_valid"),
+                "invalid_reason": forecast.get("invalid_reason"),
                 "policy_reason": None if dir_plan is None else dir_plan.policy_reason,
                 "entry_reason": None if dir_plan is None else dir_plan.entry_reason,
                 "hold_reason": None if dir_plan is None else dir_plan.hold_reason,
                 "close_reason": None if dir_plan is None else dir_plan.close_reason,
                 "reverse_reason": None if dir_plan is None else dir_plan.reverse_reason,
                 "recommended_action": None if dir_plan is None else dir_plan.candidate.value,
+                "position_thesis": None if dir_plan is None else dir_plan.position_thesis,
+                "entry_thesis": None if dir_plan is None else dir_plan.entry_thesis,
+                "signals": None
+                if dir_plan is None
+                else {
+                    "ENTRY": dir_plan.entry_signal,
+                    "HOLD": dir_plan.hold_signal,
+                    "CLOSE": dir_plan.close_signal,
+                    "REVERSE": dir_plan.reverse_signal,
+                },
             }
         )
         return base
@@ -534,11 +549,16 @@ def _account_view(engine: TraderEngine, now_ms: int) -> dict[str, Any]:
     return snap
 
 
-def _session_view(engine: TraderEngine, now_ms: int) -> dict[str, Any]:
+def _session_metrics(
+    engine: TraderEngine,
+    now_ms: int,
+    trades: list[ClosedTrade] | None = None,
+) -> dict[str, Any]:
     started = engine.session_started_ms or engine.started_at_ms or now_ms
     runtime = max(0.0, (now_ms - started) / 1000.0)
+    closed = engine.account.closed_trades if trades is None else trades
     metrics = scalp_session_metrics(
-        engine.account.closed_trades,
+        closed,
         runtime_seconds=runtime,
         max_drawdown=engine.account.drawdown,
         starting_balance=engine.account.starting_balance,
@@ -552,6 +572,36 @@ def _session_view(engine: TraderEngine, now_ms: int) -> dict[str, Any]:
     metrics["metrics_kind"] = "REALIZED_TRADE_METRICS"
     metrics["includes_open_position_mtm"] = False
     return metrics
+
+
+def _session_view(
+    engine: TraderEngine,
+    now_ms: int,
+    *,
+    run_trades: list[ClosedTrade] | None = None,
+    experiment_trades: list[ClosedTrade] | None = None,
+) -> dict[str, Any]:
+    directional = engine.settings.trading_strategy is TradingStrategy.DIRECTIONAL
+    if directional:
+        current = _session_metrics(engine, now_ms, run_trades or [])
+        current["scope"] = "CURRENT RUN"
+        current["run_id"] = engine.run_id
+        experiment = _session_metrics(engine, now_ms, experiment_trades or [])
+        experiment["scope"] = "EXPERIMENT TOTAL"
+        experiment["experiment_id"] = engine.settings.experiment_id
+        current["experiment_total"] = {
+            "scope": "EXPERIMENT TOTAL",
+            "trades": experiment["trades"],
+            "wins": experiment["wins"],
+            "losses": experiment["losses"],
+            "gross_pnl": experiment["gross_pnl"],
+            "fees": experiment["fees"],
+            "slippage": experiment["slippage"],
+            "net_pnl": experiment["net_pnl"],
+            "max_drawdown": experiment["max_drawdown"],
+        }
+        return current
+    return _session_metrics(engine, now_ms)
 
 
 def _experiment_view(engine: TraderEngine) -> dict[str, Any]:
@@ -585,6 +635,10 @@ def _directional_view(engine: TraderEngine) -> dict[str, Any] | None:
         "diagnostics": forecast.get("diagnostics") or {},
         "regime": state.get("regime") or {},
         "inspector": None if not state else compact_inspector(state),
+        "coverage": None if not state else feature_coverage(state),
+        "answer_audit": forecast.get("answer_audit") or [],
+        "research_sample_valid": forecast.get("research_sample_valid"),
+        "invalid_reason": forecast.get("invalid_reason"),
         "raw_state": state,
         "policy": None
         if plan is None
@@ -596,7 +650,16 @@ def _directional_view(engine: TraderEngine) -> dict[str, Any] | None:
             "reverse_reason": plan.reverse_reason,
             "consensus": plan.direction_consensus,
             "conflict": plan.direction_conflict,
+            "signals": {
+                "ENTRY": plan.entry_signal,
+                "HOLD": plan.hold_signal,
+                "CLOSE": plan.close_signal,
+                "REVERSE": plan.reverse_signal,
+            },
+            "recommended": plan.recommended,
         },
+        "entry_thesis": None if plan is None else plan.entry_thesis,
+        "position_thesis": None if plan is None else plan.position_thesis,
         "forecast_quality": engine.calibration_view,
     }
 
@@ -610,6 +673,8 @@ def build_operator_snapshot(
     trades: list[dict[str, Any]],
     events: list[dict[str, Any]],
     calibration: dict[str, Any] | None = None,
+    run_closed_trades: list[ClosedTrade] | None = None,
+    experiment_closed_trades: list[ClosedTrade] | None = None,
 ) -> dict[str, Any]:
     symbol = engine.settings.symbols[0]
     state = engine.last_state
@@ -641,6 +706,10 @@ def build_operator_snapshot(
                 else engine.last_result.decision.model
             ),
             "engine": engine.lifecycle,
+            "strategy_running": engine.strategy_running,
+            "can_start": engine.lifecycle == "STOPPED",
+            "can_stop": engine.lifecycle in {"STARTING", "RUNNING"},
+            "strategy_error": engine.strategy_error,
             "binance_websocket": _binance_ws_status(engine, state),
             "last_binance_update": {
                 "timestamp": _iso(last_market_ms),
@@ -666,7 +735,12 @@ def build_operator_snapshot(
         "best_opportunity": _best_opportunity_view(engine),
         "opportunity_matrix": matrix,
         "latency": _latency_view(engine),
-        "session": _session_view(engine, now_ms),
+        "session": _session_view(
+            engine,
+            now_ms,
+            run_trades=run_closed_trades,
+            experiment_trades=experiment_closed_trades,
+        ),
         "recent_decisions": decisions,
         "recent_trades": trades,
         "recent_events": events,

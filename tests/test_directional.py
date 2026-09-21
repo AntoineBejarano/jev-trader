@@ -17,11 +17,17 @@ from src.directional.candles import (
     streak_hit,
 )
 from src.directional.constants import FEATURE_SCHEMA_VERSION, QUESTION_VERSION, STRATEGY_VERSION
+from src.directional.coverage import feature_coverage, missing_required
 from src.directional.features import build_directional_state
 from src.directional.outcomes import counterfactual_horizon, magnitude_bucket, rolling_outcome
 from src.directional.parse import parse_directional_forecast
 from src.directional.policy import DirectionalPolicy
-from src.directional.questions import directional_questions, directional_required_keys
+from src.directional.questions import (
+    CANDLE_DIRECTION_QUESTIONS,
+    ROLLING_DIRECTION_QUESTIONS,
+    directional_questions,
+    directional_required_keys,
+)
 from src.directional.serialize import serialize_directional_state
 from src.experiment.fingerprint import (
     QUESTION_VERSION as SCALP_QUESTION_VERSION,
@@ -67,7 +73,16 @@ def _mids(
 
 
 def _directional_payload(
-    *, p_1m: float = 0.84, p_5m: float = 0.77, p_10m: float = 0.63, p_30m: float = 0.49
+    *,
+    p_1m: float = 0.84,
+    p_5m: float = 0.77,
+    p_10m: float = 0.63,
+    p_30m: float = 0.49,
+    strengthening: float = 0.61,
+    weakening: float = 0.29,
+    reversal: float = 0.22,
+    persist_2_up: float = 0.55,
+    persist_2_down: float = 0.18,
 ) -> dict:
     answers: dict[str, object] = {
         "up_60s": {"type": "noul", "noul": p_1m},
@@ -98,19 +113,19 @@ def _directional_payload(
         "candle_up_5m": {"type": "noul", "noul": 0.66},
         "candle_up_10m": {"type": "noul", "noul": 0.58},
         "candle_up_30m": {"type": "noul", "noul": 0.51},
-        "next_2_1m_up": {"type": "noul", "noul": 0.55},
+        "next_2_1m_up": {"type": "noul", "noul": persist_2_up},
         "next_3_1m_up": {"type": "noul", "noul": 0.40},
         "next_5_1m_up": {"type": "noul", "noul": 0.22},
-        "next_2_1m_down": {"type": "noul", "noul": 0.18},
+        "next_2_1m_down": {"type": "noul", "noul": persist_2_down},
         "next_3_1m_down": {"type": "noul", "noul": 0.10},
         "next_5_1m_down": {"type": "noul", "noul": 0.04},
         "next_2_5m_up": {"type": "noul", "noul": 0.48},
         "next_3_5m_up": {"type": "noul", "noul": 0.31},
         "next_2_5m_down": {"type": "noul", "noul": 0.20},
         "next_3_5m_down": {"type": "noul", "noul": 0.11},
-        "momentum_strengthening": {"type": "noul", "noul": 0.61},
-        "momentum_weakening": {"type": "noul", "noul": 0.29},
-        "reversal_60s": {"type": "noul", "noul": 0.22},
+        "momentum_strengthening": {"type": "noul", "noul": strengthening},
+        "momentum_weakening": {"type": "noul", "noul": weakening},
+        "reversal_60s": {"type": "noul", "noul": reversal},
         "market_character": {
             "type": "choice",
             "choice": "DIRECTIONAL",
@@ -289,6 +304,8 @@ def test_hysteresis_needs_confirmations() -> None:
             else None
         }
     )
+    first_down = policy.evaluate(long_state, down_result)
+    assert first_down.candidate is Action.HOLD
     close = policy.evaluate(long_state, down_result)
     assert close.candidate in {Action.CLOSE, Action.REVERSE}
 
@@ -373,8 +390,10 @@ async def test_directional_postgres_style_persistence(tmp_path: Path) -> None:
                 "p_up": {"1m": 0.84, "5m": 0.77, "10m": 0.63, "30m": 0.49},
                 "reference_mid": 100.0,
                 "reference_ts": state.timestamp_ms,
+                "research_sample_valid": True,
             },
             "policy": {"candidate": "NO_ACTION"},
+            "research_sample_valid": True,
         },
     )
     rows = await repo.list_directional_forecasts("run-dir")
@@ -434,4 +453,175 @@ async def test_restart_idempotent_directional_row(tmp_path: Path) -> None:
     rows = await repo.list_directional_forecasts("r")
     assert len(rows) == 2
     assert all(isinstance(row, DirectionalForecastRow) for row in rows)
+    await db.aclose()
+
+
+def test_rolling_and_candle_questions_are_independent() -> None:
+    questions = directional_questions()
+    rolling_keys = [key for key, _label, _seconds in ROLLING_DIRECTION_QUESTIONS]
+    candle_keys = [key for key, _label in CANDLE_DIRECTION_QUESTIONS]
+    assert rolling_keys == ["up_60s", "up_300s", "up_600s", "up_1800s"]
+    assert candle_keys == ["candle_up_1m", "candle_up_5m", "candle_up_10m", "candle_up_30m"]
+    assert len(set(rolling_keys)) == 4
+    assert len(set(candle_keys)) == 4
+    texts = [questions[key]["instructions"] for key in rolling_keys + candle_keys]
+    assert len(set(texts)) == 8
+    parsed = parse_directional_forecast(
+        decode_raw(_directional_payload(p_1m=0.21, p_5m=0.33, p_10m=0.44, p_30m=0.55))
+    )
+    assert parsed["p_up"] == {"1m": 0.21, "5m": 0.33, "10m": 0.44, "30m": 0.55}
+    audit = {row["question_id"]: row for row in parsed["answer_audit"]}
+    assert audit["up_60s"]["raw_jev_value"] == 0.21
+    assert audit["up_300s"]["parsed_probability"] == 0.33
+    assert audit["up_600s"]["horizon"] == "10m"
+    assert audit["up_1800s"]["parsed_probability"] == 0.55
+    assert audit["candle_up_1m"]["parsed_probability"] == 0.72
+    flipped = _directional_payload(p_1m=0.21, p_5m=0.33, p_10m=0.44, p_30m=0.55)
+    flipped["answers"]["up_600s"] = {"type": "noul", "noul": 0.91}
+    flipped["answers"]["candle_up_5m"] = {"type": "noul", "noul": 0.11}
+    changed = parse_directional_forecast(decode_raw(flipped))
+    assert changed["p_up"]["1m"] == 0.21
+    assert changed["p_up"]["5m"] == 0.33
+    assert changed["p_up"]["10m"] == 0.91
+    assert changed["p_up"]["30m"] == 0.55
+    assert changed["candle_up"]["1m"] == 0.72
+    assert changed["candle_up"]["5m"] == 0.11
+    identical = parse_directional_forecast(
+        decode_raw(_directional_payload(p_1m=0.22, p_5m=0.22, p_10m=0.22, p_30m=0.22))
+    )
+    assert identical["p_up"] == {"1m": 0.22, "5m": 0.22, "10m": 0.22, "30m": 0.22}
+
+
+def test_warmup_rows_excluded_from_official_calibration() -> None:
+    valid = DirectionalForecastRow(
+        id="v",
+        timestamp=__import__("datetime").datetime.now(__import__("datetime").UTC),
+        timestamp_ms=1,
+        symbol="BTCUSDT",
+        exchange="binance_usdm",
+        question_version="q.directional.v1",
+        strategy_version="directional.v1",
+        feature_schema_version="directional.state.v1",
+        feature_state={},
+        forecast={"p_up": {"1m": 0.8}, "research_sample_valid": True},
+        policy={},
+        rolling_outcomes={"1m": {"direction": "UP", "baselines": {}}},
+        research_sample_valid=True,
+        run_id="run-a",
+    )
+    warmup = DirectionalForecastRow(
+        id="w",
+        timestamp=__import__("datetime").datetime.now(__import__("datetime").UTC),
+        timestamp_ms=2,
+        symbol="BTCUSDT",
+        exchange="binance_usdm",
+        question_version="q.directional.v1",
+        strategy_version="directional.v1",
+        feature_schema_version="directional.state.v1",
+        feature_state={},
+        forecast={
+            "p_up": {"1m": 0.9},
+            "research_sample_valid": False,
+            "invalid_reason": "warmup_incomplete",
+        },
+        policy={},
+        rolling_outcomes={"1m": {"direction": "DOWN", "baselines": {}}},
+        research_sample_valid=False,
+        invalid_reason="warmup_incomplete",
+        run_id="run-a",
+    )
+    summary = summarize_directional_calibration([valid, warmup])
+    assert summary["n_raw_predictions"] == 2
+    assert summary["n_valid_research"] == 1
+    assert summary["n_nonoverlapping_valid"] == 1
+    assert summary["horizons"]["1m"]["n"] == 1
+    assert summary["horizons"]["1m"]["accuracy"] == 1.0
+
+
+def test_r_1h_is_required_and_seeded_history_survives_eviction() -> None:
+    from src.market.buffer import MarketBuffer
+    from src.market.history import seed_buffer_from_klines
+
+    now = 3_600_000 * 3
+    buffer = MarketBuffer(
+        symbol="BTCUSDT", exchange="binance_usdm", history_ms=3_600_000, clock=lambda: now
+    )
+    klines = []
+    start = now - 120 * 60_000
+    for i in range(120):
+        open_time = start + i * 60_000
+        close_time = open_time + 59_999
+        px = 100.0 + i * 0.01
+        klines.append([open_time, px, px, px, px + 0.01, 1.0, close_time])
+    seeded = seed_buffer_from_klines(buffer, klines)
+    assert seeded > 100
+    buffer.record_mid(102.0, now)
+    stamps, values = buffer.mids_as_lists()
+    assert stamps[0] <= now - 3_600_000
+    from src.features.returns import compute_returns
+
+    returns = compute_returns(stamps, values, now, 102.0)
+    assert returns.r_1h is not None
+    coverage = feature_coverage(
+        {
+            "microstructure": {
+                "mid": 102.0,
+                "best_bid": 101.9,
+                "best_ask": 102.1,
+                "spread_bps": 1.0,
+            },
+            "price_action": {
+                "returns": returns.model_dump() | {"r_10m": 0.01, "r_30m": 0.02},
+                "active_candles": {"1m": {"open": 1}, "5m": {"open": 1}},
+            },
+            "health": {"book_valid": True, "has_mid": True},
+        }
+    )
+    assert "price_action.returns.r_1h" not in coverage["required_missing"]
+    assert missing_required({"microstructure": {}})
+
+
+@pytest.mark.asyncio
+async def test_current_run_trades_are_not_mixed(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'scope.db'}")
+    await db.create_all()
+    repo = Repository(db)
+    repo.bind_run(run_id="run-new", experiment_id="directional-v1-scope", config_hash="h")
+    from datetime import UTC, datetime
+
+    from src.storage.models import TradeRow
+
+    async with db.session() as session:
+        session.add(
+            TradeRow(
+                opened_at=datetime.now(UTC),
+                symbol="BTCUSDT",
+                exchange="binance_usdm",
+                side="LONG",
+                quantity=0.01,
+                entry_price=100.0,
+                exit_price=101.0,
+                entry_notional=1000.0,
+                holding_seconds=10.0,
+                gross_pnl=1.0,
+                fees=0.1,
+                net_pnl=0.9,
+                payload={},
+                run_id="run-old",
+                experiment_id="scalp-v3-manual-001",
+            )
+        )
+        await session.commit()
+    recent = await repo.list_recent_trades(20, run_id="run-new")
+    assert recent == []
+    mixed = await repo.list_recent_trades(20)
+    assert len(mixed) == 1
+    from src.portfolio.account import PaperAccount
+
+    await repo.save_paper_account(
+        PaperAccount.new(starting_balance=10_000, currency="USDT", now_ms=1)
+    )
+    restored = await repo.load_paper_account()
+    assert restored is not None
+    assert restored.closed_trades == []
     await db.aclose()

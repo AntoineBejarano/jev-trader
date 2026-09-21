@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from src.directional.constants import FEATURE_SCHEMA_VERSION
+from src.directional.coverage import feature_coverage
 from src.directional.features import feature_groups
 from src.jev.state_serializer import MAX_STATE_CHARS, _round
 
@@ -64,14 +65,19 @@ def compact_inspector(state: dict[str, Any]) -> dict[str, Any]:
             compact[name] = group
             continue
         compact[name] = {
-            key: _summarize(value) for key, value in group.items() if not _forbidden(str(key))
+            key: _summarize(value, keep_all=key == "returns")
+            for key, value in group.items()
+            if not _forbidden(str(key))
         }
+    coverage = feature_coverage(state)
+    compact["coverage"] = coverage
     return compact
 
 
-def _summarize(value: Any) -> Any:
+def _summarize(value: Any, *, keep_all: bool = False) -> Any:
     if isinstance(value, dict):
-        return {key: _summarize(item) for key, item in list(value.items())[:12]}
+        items = value.items() if keep_all else list(value.items())[:12]
+        return {key: _summarize(item) for key, item in items}
     if isinstance(value, list):
         return [_summarize(item) for item in value[:4]]
     return value

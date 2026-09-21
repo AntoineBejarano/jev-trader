@@ -6,6 +6,19 @@ from src.jev.models import ChoiceQuestion, NoulQuestion
 
 QUESTION_SET_VERSION = "q.directional.v1"
 
+ROLLING_DIRECTION_QUESTIONS: tuple[tuple[str, str, int], ...] = (
+    ("up_60s", "1m", 60),
+    ("up_300s", "5m", 300),
+    ("up_600s", "10m", 600),
+    ("up_1800s", "30m", 1800),
+)
+CANDLE_DIRECTION_QUESTIONS: tuple[tuple[str, str], ...] = (
+    ("candle_up_1m", "1m"),
+    ("candle_up_5m", "5m"),
+    ("candle_up_10m", "10m"),
+    ("candle_up_30m", "30m"),
+)
+
 
 def _noul(instructions: str, true: str, false: str) -> dict[str, Any]:
     return NoulQuestion(

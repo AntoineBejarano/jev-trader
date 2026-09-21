@@ -251,6 +251,33 @@ Tests never place orders. They do not call OpenRouter or authenticated Binance A
 
 ---
 
+## Deploy on Railway
+
+The process is a **long-lived worker** (WebSockets + FastAPI). Use a Railway **service**, not a serverless function. Keep **one replica**.
+
+1. Create a Railway project and add a **PostgreSQL** plugin.
+2. Deploy this repo with the included `Dockerfile` / `railway.toml`.
+3. Set service variables (do not commit `.env`):
+
+```bash
+TRADING_MODE=PAPER
+TRADING_STRATEGY=DIRECTIONAL
+TRADING_EXCHANGE=binance_usdm
+TRADING_SYMBOLS=BTCUSDT
+OPENROUTER_API_KEY=...
+DATABASE_URL=${{Postgres.DATABASE_PRIVATE_URL}}
+HOST=0.0.0.0
+ENVIRONMENT=production
+EXPERIMENT_ID=directional-v1-railway-001
+EXPERIMENT_FROZEN=true
+```
+
+Railway injects `PORT`. The image binds `0.0.0.0` and the health check is `GET /health`. Live trading stays blocked.
+
+After deploy, open the public URL at `/dashboard`.
+
+---
+
 ## Repository map
 
 ```text

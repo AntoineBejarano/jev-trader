@@ -11,7 +11,9 @@ from src.market.buffer import MarketBuffer
 # Do not fabricate order-book or aggressive-flow history.
 
 KLINE_INTERVAL = "1m"
-KLINE_LIMIT = 70
+# 1m USD-M klines: enough deterministic OHLC to populate r_1h / 30m candles
+# immediately. Do not fabricate order-book or aggressive-flow history.
+KLINE_LIMIT = 130
 
 
 def klines_to_mid_samples(klines: Sequence[Sequence[Any]]) -> list[tuple[int, float]]:

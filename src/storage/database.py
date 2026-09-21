@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -14,6 +15,17 @@ from sqlalchemy.ext.asyncio import (
 from src.storage.models import Base
 from src.storage.schema import add_missing_columns
 
+_ASYNCPG_UNSUPPORTED_QUERY_KEYS = frozenset(
+    {
+        "sslmode",
+        "ssl",
+        "channel_binding",
+        "gssencmode",
+        "target_session_attrs",
+    }
+)
+_SSL_REQUIRED_MODES = frozenset({"require", "verify-ca", "verify-full"})
+
 
 def database_kind(url: str) -> str:
     lowered = url.lower()
@@ -24,18 +36,37 @@ def database_kind(url: str) -> str:
     return "unknown"
 
 
+def postgres_requires_ssl(url: str) -> bool:
+    query = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    sslmode = query.get("sslmode", "").lower()
+    if sslmode in _SSL_REQUIRED_MODES:
+        return True
+    if sslmode in {"disable", "allow", "prefer"}:
+        return False
+    host = (urlsplit(url).hostname or "").lower()
+    return host.endswith(".rlwy.net") or host.endswith(".railway.app")
+
+
 def async_database_url(url: str) -> str:
     if url.startswith("sqlite+aiosqlite://"):
         return url
     if url.startswith("sqlite:///"):
         return "sqlite+aiosqlite:///" + url.removeprefix("sqlite:///")
     if url.startswith("postgresql+asyncpg://"):
+        normalized = url
+    elif url.startswith("postgresql://"):
+        normalized = "postgresql+asyncpg://" + url.removeprefix("postgresql://")
+    elif url.startswith("postgres://"):
+        normalized = "postgresql+asyncpg://" + url.removeprefix("postgres://")
+    else:
         return url
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url.removeprefix("postgresql://")
-    if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url.removeprefix("postgres://")
-    return url
+    parts = urlsplit(normalized)
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in _ASYNCPG_UNSUPPORTED_QUERY_KEYS
+    ]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
 
 
 def _sqlite_on_connect(dbapi_connection: object, _connection_record: object) -> None:
@@ -52,6 +83,8 @@ class Database:
         connect_args: dict[str, object] = {}
         if self.url.startswith("sqlite+"):
             connect_args["timeout"] = 30
+        elif self.url.startswith("postgresql+") and postgres_requires_ssl(url):
+            connect_args["ssl"] = True
         self.engine: AsyncEngine = create_async_engine(
             self.url,
             echo=False,

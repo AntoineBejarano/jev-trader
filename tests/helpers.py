@@ -27,6 +27,10 @@ def make_market_state(
     spread_bps: float | None = None,
     rv_1m: float | None = None,
     rv_30s: float | None = None,
+    mfe_bps: float | None = None,
+    mae_bps: float | None = None,
+    unrealized_pnl_bps: float | None = None,
+    profit_giveback_bps: float | None = None,
 ) -> MarketState:
     best_bid = bid if bid is not None else price - 0.05
     best_ask = ask if ask is not None else price + 0.05
@@ -52,6 +56,10 @@ def make_market_state(
             entry_price=None if side is Side.FLAT else price,
             quantity=quantity,
             age_seconds=age_seconds,
+            max_favorable_excursion_bps=mfe_bps,
+            max_adverse_excursion_bps=mae_bps,
+            unrealized_pnl_bps=unrealized_pnl_bps,
+            profit_giveback_bps=profit_giveback_bps,
         ),
         health=MarketHealth(
             trading_allowed=trading_allowed and not stale and warmup_ready,

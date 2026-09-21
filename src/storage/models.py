@@ -323,6 +323,8 @@ class DirectionalForecastRow(RunAttributionMixin, Base):
     )
     counterfactuals: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False, default=dict)
     mature: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    research_sample_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    invalid_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

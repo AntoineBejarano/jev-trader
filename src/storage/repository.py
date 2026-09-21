@@ -30,6 +30,7 @@ from src.directional.constants import HORIZON_LABELS, HORIZON_SECONDS
 from src.directional.outcomes import enrich_forecast_row
 from src.execution.paper import ExecutionReport, PaperFill
 from src.jev.models import JevCallResult, JevCallStatus
+from src.market.buffer import wall_clock_ms
 from src.market.models import MarketState, Side
 from src.portfolio.account import ClosedTrade, OpenPosition, PaperAccount
 from src.storage.database import Database
@@ -251,6 +252,14 @@ class Repository:
                         ),
                         counterfactuals=dict(directional_payload.get("counterfactuals") or {}),
                         mature=False,
+                        research_sample_valid=bool(
+                            directional_payload.get("research_sample_valid")
+                        ),
+                        invalid_reason=(
+                            None
+                            if directional_payload.get("invalid_reason") is None
+                            else str(directional_payload.get("invalid_reason"))
+                        ),
                         **self._run_fields(),
                     )
                 )
@@ -668,11 +677,28 @@ class Repository:
             if row is None:
                 return None
             account = PaperAccount.from_payload(row.payload)
-            trades = (
-                await session.execute(select(TradeRow).order_by(TradeRow.opened_at))
-            ).scalars()
+            stmt = select(TradeRow).order_by(TradeRow.opened_at)
+            if self.experiment_id:
+                stmt = stmt.where(TradeRow.experiment_id == self.experiment_id)
+            trades = (await session.execute(stmt)).scalars()
             account.closed_trades = [_closed_from_row(item) for item in trades]
             return account
+
+    async def reset_paper_account(
+        self,
+        *,
+        starting_balance: float,
+        currency: str = "USDT",
+        now_ms: int | None = None,
+    ) -> PaperAccount:
+        """Replace the singleton PAPER account. Does not delete SCALP trade rows."""
+        account = PaperAccount.new(
+            starting_balance=starting_balance,
+            currency=currency,
+            now_ms=now_ms if now_ms is not None else wall_clock_ms(),
+        )
+        await self.save_paper_account(account)
+        return account
 
     async def persist_equity_snapshot(self, account: PaperAccount, now_ms: int) -> None:
         snap = account.equity_snapshot(now_ms)
@@ -698,47 +724,38 @@ class Repository:
             )
             await session.commit()
 
-    async def list_recent_decisions(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def list_recent_decisions(
+        self, limit: int = 20, *, run_id: str | None = None
+    ) -> list[dict[str, Any]]:
         async with self.db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(JevDecisionRow)
-                        .order_by(JevDecisionRow.timestamp_ms.desc())
-                        .limit(limit)
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            stmt = select(JevDecisionRow).order_by(JevDecisionRow.timestamp_ms.desc()).limit(limit)
+            if run_id:
+                stmt = stmt.where(JevDecisionRow.run_id == run_id)
+            rows = (await session.execute(stmt)).scalars().all()
         return [_decision_view(row) for row in rows]
 
-    async def list_recent_trades(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def list_recent_trades(
+        self, limit: int = 20, *, run_id: str | None = None
+    ) -> list[dict[str, Any]]:
         async with self.db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(TradeRow).order_by(TradeRow.opened_at.desc()).limit(limit)
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            stmt = select(TradeRow).order_by(TradeRow.opened_at.desc()).limit(limit)
+            if run_id:
+                stmt = stmt.where(TradeRow.run_id == run_id)
+            rows = (await session.execute(stmt)).scalars().all()
         return [_trade_view(row) for row in rows]
 
-    async def list_recent_events(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def list_recent_events(
+        self, limit: int = 20, *, run_id: str | None = None
+    ) -> list[dict[str, Any]]:
         async with self.db.session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(SystemEventRow)
-                        .order_by(SystemEventRow.timestamp.desc())
-                        .limit(limit)
-                    )
-                )
-                .scalars()
-                .all()
+            stmt = (
+                select(SystemEventRow)
+                .order_by(SystemEventRow.timestamp.desc())
+                .limit(limit)
             )
+            if run_id:
+                stmt = stmt.where(SystemEventRow.run_id == run_id)
+            rows = (await session.execute(stmt)).scalars().all()
         return [
             {
                 "timestamp": row.timestamp.isoformat(),
@@ -780,6 +797,21 @@ class Repository:
                     await session.execute(
                         select(TradeRow)
                         .where(TradeRow.run_id == run_id)
+                        .order_by(TradeRow.opened_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return list(rows)
+
+    async def list_trades_for_experiment(self, experiment_id: str) -> list[TradeRow]:
+        async with self.db.session() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(TradeRow)
+                        .where(TradeRow.experiment_id == experiment_id)
                         .order_by(TradeRow.opened_at.asc())
                     )
                 )
@@ -836,6 +868,7 @@ class Repository:
                 trades += 1
         return {
             "forecasts": len(rows),
+            "valid_forecasts": sum(1 for row in rows if _directional_row_valid(row)),
             "mature_rolling": mature_rolling,
             "directional_actions": trades,
         }
@@ -1207,6 +1240,17 @@ def _trade_row(trade: ClosedTrade, **run_fields: str | None) -> TradeRow:
             "funding_accounting": trade.funding_accounting,
             "trade_net_pnl_usdt": trade.net_pnl,
             "trade_net_return_bps_on_notional": trade.net_pnl_bps,
+            "research": trade.research,
+            "capture_ratio": None if not trade.research else trade.research.get("capture_ratio"),
+            "thesis_score_entry": None
+            if not trade.research
+            else trade.research.get("thesis_score_entry"),
+            "thesis_score_close": None
+            if not trade.research
+            else trade.research.get("thesis_score_close"),
+            "primary_horizon": None
+            if not trade.research
+            else trade.research.get("primary_horizon"),
         },
         **run_fields,
     )
@@ -1265,6 +1309,7 @@ def _closed_from_row(row: TradeRow) -> ClosedTrade:
         market_move_pnl=float(payload.get("market_move_pnl") or 0.0),
         attribution_residual=float(payload.get("attribution_residual") or 0.0),
         funding_accounting=str(payload.get("funding_accounting") or "disabled_zero"),
+        research=payload.get("research") if isinstance(payload.get("research"), dict) else None,
     )
 
 
@@ -1272,6 +1317,10 @@ def _decision_view(row: JevDecisionRow) -> dict[str, Any]:
     parsed = row.parsed_probabilities if isinstance(row.parsed_probabilities, dict) else {}
     scalp = row.scalp_payload if isinstance(row.scalp_payload, dict) else {}
     best = scalp.get("best")
+    raw_forecast = parsed.get("directional_forecast")
+    forecast = raw_forecast if isinstance(raw_forecast, dict) else {}
+    raw_p = forecast.get("p_up")
+    p_up = raw_p if isinstance(raw_p, dict) else {}
     return {
         "timestamp": row.timestamp.isoformat(),
         "timestamp_ms": row.timestamp_ms,
@@ -1281,6 +1330,11 @@ def _decision_view(row: JevDecisionRow) -> dict[str, Any]:
         "desired_exposure": parsed.get("exposure_choice"),
         "long_probability": parsed.get("long_probability"),
         "short_probability": parsed.get("short_probability"),
+        "p_up_1m": p_up.get("1m"),
+        "p_up_5m": p_up.get("5m"),
+        "p_up_10m": p_up.get("10m"),
+        "p_up_30m": p_up.get("30m"),
+        "research_sample_valid": scalp.get("research_sample_valid"),
         "evidence": parsed.get("evidence_probability"),
         "noise": parsed.get("noise_probability"),
         "continuation": parsed.get("continuation_probability"),
@@ -1327,15 +1381,31 @@ def _trade_view(row: TradeRow) -> dict[str, Any]:
         "entry_horizon_seconds": payload.get("entry_horizon_seconds"),
         "entry_net_ev_bps": payload.get("entry_net_ev_bps"),
         "exit_reason": payload.get("exit_reason"),
+        "exit_source": payload.get("exit_source"),
+        "capture_ratio": payload.get("capture_ratio"),
+        "thesis_score_entry": payload.get("thesis_score_entry"),
+        "thesis_score_close": payload.get("thesis_score_close"),
+        "primary_horizon": payload.get("primary_horizon"),
+        "research": payload.get("research"),
     }
 
 
+def _directional_row_valid(row: DirectionalForecastRow) -> bool:
+    if row.research_sample_valid is True:
+        return True
+    forecast = row.forecast if isinstance(row.forecast, dict) else {}
+    return forecast.get("research_sample_valid") is True
+
+
 def summarize_directional_calibration(rows: list[DirectionalForecastRow]) -> dict[str, Any]:
+    n_raw = len(rows)
+    official = [row for row in rows if _directional_row_valid(row)]
+    n_valid = len(official)
     horizons: dict[str, list[dict[str, Any]]] = {label: [] for label in HORIZON_LABELS}
     candles: dict[str, list[dict[str, Any]]] = {label: [] for label in HORIZON_LABELS}
     persistence: dict[str, list[dict[str, Any]]] = {}
     magnitude: dict[str, list[dict[str, Any]]] = {label: [] for label in HORIZON_LABELS}
-    for row in rows:
+    for row in official:
         forecast = row.forecast if isinstance(row.forecast, dict) else {}
         raw_p = forecast.get("p_up")
         p_up: dict[str, Any] = raw_p if isinstance(raw_p, dict) else {}
@@ -1416,9 +1486,19 @@ def summarize_directional_calibration(rows: list[DirectionalForecastRow]) -> dic
             seg = str(item.get("remaining_segment") or "unknown")
             by_seg.setdefault(seg, []).append(item)
         candle_summary[label] = {
-            **summarize_binary(items, p_key="p_up", hit_key="actual_up"),
+            **summarize_binary(
+                items,
+                p_key="p_up",
+                hit_key="actual_up",
+                min_gap_ms=horizon_gap[label],
+            ),
             "by_remaining": {
-                seg: summarize_binary(group, p_key="p_up", hit_key="actual_up")
+                seg: summarize_binary(
+                    group,
+                    p_key="p_up",
+                    hit_key="actual_up",
+                    min_gap_ms=horizon_gap[label],
+                )
                 for seg, group in by_seg.items()
             },
         }
@@ -1431,9 +1511,13 @@ def summarize_directional_calibration(rows: list[DirectionalForecastRow]) -> dic
         key: summarize_binary(items, p_key="p_up", hit_key="actual_up")
         for key, items in persistence.items()
     }
+    spaced_1m = summary_h.get("1m") or {}
     return {
         "kind": "DIRECTIONAL",
-        "n_forecasts": len(rows),
+        "n_raw_predictions": n_raw,
+        "n_valid_research": n_valid,
+        "n_nonoverlapping_valid": spaced_1m.get("n_nonoverlapping", 0),
+        "n_forecasts": n_valid,
         "horizons": summary_h,
         "candles": candle_summary,
         "persistence": persist_summary,

@@ -10,7 +10,11 @@ from typing import Any
 
 from src.analytics.latency import LatencyTracker
 from src.analytics.outcomes import enrich_decision_outcomes
-from src.analytics.research_sample import annotate_research_sample, research_sample_status
+from src.analytics.research_sample import (
+    INVALID_CONTEXT,
+    annotate_research_sample,
+    research_sample_status,
+)
 from src.api.snapshot import build_operator_snapshot
 from src.config.settings import Settings, TradingMode, TradingStrategy
 from src.decision.actions import EXECUTABLE_ACTIONS, Action, ActionSource
@@ -20,16 +24,19 @@ from src.decision.scalp import ScalpPlan, ScalpPolicy, plan_payload
 from src.directional.constants import (
     FEATURE_SCHEMA_VERSION as DIRECTIONAL_FEATURE_SCHEMA,
 )
+from src.directional.constants import HORIZON_SECONDS_BY_LABEL
 from src.directional.constants import (
     QUESTION_VERSION as DIRECTIONAL_QUESTION_VERSION,
 )
 from src.directional.constants import (
     STRATEGY_VERSION as DIRECTIONAL_STRATEGY_VERSION,
 )
+from src.directional.coverage import missing_required
 from src.directional.cross import CrossMarketCache
 from src.directional.features import build_directional_state
 from src.directional.policy import DirectionalPlan, DirectionalPolicy
 from src.directional.serialize import compact_inspector, serialize_directional_state
+from src.directional.thesis import capture_ratio
 from src.execution.paper import ExecutionReport, PaperExecutionEngine
 from src.experiment.fingerprint import (
     active_question_version,
@@ -43,10 +50,10 @@ from src.jev.models import JevCallResult, JevCallStatus
 from src.market.buffer import wall_clock_ms
 from src.market.client import BinanceMarketDataAdapter
 from src.market.models import MarketState
-from src.portfolio.account import PaperAccount
+from src.portfolio.account import ClosedTrade, PaperAccount
 from src.risk.engine import RiskDecision, RiskEngine
 from src.storage.database import Database, database_kind
-from src.storage.repository import Repository
+from src.storage.repository import Repository, _closed_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +172,10 @@ class TraderEngine:
         self._stop = asyncio.Event()
         self._stale_symbols: set[str] = set()
         self.lifecycle = "STOPPED"
+        self.strategy_error: str | None = None
+        self._strategy_task: asyncio.Task[None] | None = None
+        self._control_lock = asyncio.Lock()
+        self._bootstrapped = False
         self.started_at_ms: int | None = None
         self.last_state: MarketState | None = None
         self.last_result: JevCallResult | None = None
@@ -194,13 +205,100 @@ class TraderEngine:
     def request_stop(self) -> None:
         self._stop.set()
 
+    @property
+    def strategy_running(self) -> bool:
+        return self.lifecycle in {"STARTING", "RUNNING"}
+
+    async def start_strategy(self) -> dict[str, Any]:
+        async with self._control_lock:
+            if self.lifecycle in {"STARTING", "RUNNING"}:
+                return {
+                    "ok": True,
+                    "changed": False,
+                    "engine": self.lifecycle,
+                    "detail": "already_running",
+                }
+            if self.lifecycle == "STOPPING":
+                return {
+                    "ok": False,
+                    "changed": False,
+                    "engine": self.lifecycle,
+                    "error": "still_stopping",
+                }
+            self._stop = asyncio.Event()
+            self.strategy_error = None
+            self.lifecycle = "STARTING"
+            self._strategy_task = asyncio.create_task(
+                self._strategy_session(), name="strategy-session"
+            )
+            return {"ok": True, "changed": True, "engine": "STARTING"}
+
+    async def stop_strategy(self) -> dict[str, Any]:
+        async with self._control_lock:
+            if self.lifecycle == "STOPPED":
+                return {
+                    "ok": True,
+                    "changed": False,
+                    "engine": "STOPPED",
+                    "detail": "already_stopped",
+                }
+            self.lifecycle = "STOPPING"
+            self.request_stop()
+            task = self._strategy_task
+            if task is not None and not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+                except TimeoutError:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                except asyncio.CancelledError:
+                    pass
+            self.lifecycle = "STOPPED"
+            self._strategy_task = None
+            return {"ok": True, "changed": True, "engine": "STOPPED"}
+
+    async def shutdown(self) -> None:
+        """Process teardown. Stops strategy and closes DB / Jev clients."""
+        await self.stop_strategy()
+        try:
+            await self.adapter.close()
+        except Exception:
+            logger.exception("Adapter close during shutdown failed")
+        if self._owns_jev:
+            await self.jev.aclose()
+        await self.cross_market.aclose()
+        if self._owns_db:
+            await self.db.aclose()
+        logger.info("Process shutdown complete")
+
     async def run(self) -> None:
+        """Blocking strategy session used by tests/scripts. Dashboard uses start/stop."""
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, self.request_stop)
             except NotImplementedError:
                 pass
+        await self.start_strategy()
+        task = self._strategy_task
+        if task is not None:
+            await task
+        await self.shutdown()
+
+    async def _strategy_session(self) -> None:
+        try:
+            await self._run_session()
+        except Exception as exc:
+            self.strategy_error = str(exc)
+            logger.exception("Strategy session failed")
+        finally:
+            self.lifecycle = "STOPPED"
+            self._strategy_task = None
+
+    async def _run_session(self) -> None:
         logger.info(
             "Starting Phase 4 exchange=%s symbols=%s mode=%s strategy=%s db=%s jev=%s",
             self.settings.trading_exchange,
@@ -225,53 +323,55 @@ class TraderEngine:
             logger.error(
                 "OPENROUTER_API_KEY missing — Jev calls will be skipped and no position may open"
             )
-        await self.db.create_all()
-        self.repo.bind_run(
-            run_id=self.run_id,
-            experiment_id=self.settings.experiment_id,
-            config_hash=self.config_hash,
-        )
-        self.lifecycle = "RUNNING"
-        self.started_at_ms = wall_clock_ms()
-        self.session_started_ms = self.started_at_ms
-        await self.repo.persist_experiment_run(
-            run_id=self.run_id,
-            experiment_id=self.settings.experiment_id,
-            config_hash=self.config_hash,
-            frozen=self.settings.experiment_frozen,
-            started_at_ms=self.started_at_ms,
-            fingerprint=self.config_fingerprint,
-        )
-        logger.info(
-            "EXPERIMENT id=%s run_id=%s config_hash=%s frozen=%s question=%s strategy=%s",
-            self.settings.experiment_id,
-            self.run_id,
-            self.config_hash,
-            self.settings.experiment_frozen,
-            active_question_version(self.settings),
-            active_strategy_version(self.settings),
-        )
-        if self.settings.experiment_frozen:
-            logger.info(
-                "CONFIG FROZEN fingerprint=%s",
-                json.dumps(self.config_fingerprint, sort_keys=True, default=str),
+        if not self._bootstrapped:
+            await self.db.create_all()
+            self.repo.bind_run(
+                run_id=self.run_id,
+                experiment_id=self.settings.experiment_id,
+                config_hash=self.config_hash,
             )
-        if self.settings.trading_mode is TradingMode.PAPER:
-            restored = await self.repo.load_paper_account()
-            if restored is not None:
-                self.account = restored
-                open_sides = [
-                    f"{pos.exchange}:{pos.symbol}:{pos.side.value}"
-                    for pos in self.account.positions.values()
-                ]
+            started = wall_clock_ms()
+            self.started_at_ms = started
+            self.session_started_ms = started
+            await self.repo.persist_experiment_run(
+                run_id=self.run_id,
+                experiment_id=self.settings.experiment_id,
+                config_hash=self.config_hash,
+                frozen=self.settings.experiment_frozen,
+                started_at_ms=started,
+                fingerprint=self.config_fingerprint,
+            )
+            logger.info(
+                "EXPERIMENT id=%s run_id=%s config_hash=%s frozen=%s question=%s strategy=%s",
+                self.settings.experiment_id,
+                self.run_id,
+                self.config_hash,
+                self.settings.experiment_frozen,
+                active_question_version(self.settings),
+                active_strategy_version(self.settings),
+            )
+            if self.settings.experiment_frozen:
                 logger.info(
-                    "Restored paper account equity=%s positions=%s open=%s",
-                    self.account.equity,
-                    self.account.open_position_count,
-                    open_sides or "FLAT",
+                    "CONFIG FROZEN fingerprint=%s",
+                    json.dumps(self.config_fingerprint, sort_keys=True, default=str),
                 )
-            else:
-                await self.repo.save_paper_account(self.account)
+            if self.settings.trading_mode is TradingMode.PAPER:
+                restored = await self.repo.load_paper_account()
+                if restored is not None:
+                    self.account = restored
+                    open_sides = [
+                        f"{pos.exchange}:{pos.symbol}:{pos.side.value}"
+                        for pos in self.account.positions.values()
+                    ]
+                    logger.info(
+                        "Restored paper account equity=%s positions=%s open=%s",
+                        self.account.equity,
+                        self.account.open_position_count,
+                        open_sides or "FLAT",
+                    )
+                else:
+                    await self.repo.save_paper_account(self.account)
+            self._bootstrapped = True
         await self.repo.record_system_event(
             event_type="ENGINE_START",
             payload={
@@ -285,24 +385,25 @@ class TraderEngine:
                 "config_hash": self.config_hash,
             },
         )
-        await self.adapter.connect()
-        await self.adapter.wait_connected()
-        await self.adapter.subscribe_market_data(self.settings.symbols)
-        monitor = asyncio.create_task(self._health_monitor(), name="health-monitor")
-        outcomes = asyncio.create_task(self._outcome_loop(), name="outcome-enricher")
+        monitor: asyncio.Task[None] | None = None
+        outcomes: asyncio.Task[None] | None = None
         try:
+            await self.adapter.connect()
+            await self.adapter.wait_connected()
+            await self.adapter.subscribe_market_data(self.settings.symbols)
+            self.lifecycle = "RUNNING"
+            monitor = asyncio.create_task(self._health_monitor(), name="health-monitor")
+            outcomes = asyncio.create_task(self._outcome_loop(), name="outcome-enricher")
             await self._decision_loop()
         finally:
-            monitor.cancel()
-            outcomes.cancel()
-            try:
-                await monitor
-            except asyncio.CancelledError:
-                pass
-            try:
-                await outcomes
-            except asyncio.CancelledError:
-                pass
+            for task in (monitor, outcomes):
+                if task is None:
+                    continue
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             try:
                 if self.settings.trading_mode is TradingMode.PAPER:
                     await self.repo.save_paper_account(self.account)
@@ -310,13 +411,7 @@ class TraderEngine:
             except Exception:
                 logger.exception("Failed to persist ENGINE_STOP")
             await self.adapter.close()
-            if self._owns_jev:
-                await self.jev.aclose()
-            await self.cross_market.aclose()
-            if self._owns_db:
-                await self.db.aclose()
-            logger.info("Shutdown complete")
-            self.lifecycle = "STOPPED"
+            logger.info("Strategy session stopped")
 
     async def _decision_loop(self) -> None:
         interval = self.settings.decision_interval_seconds
@@ -408,7 +503,13 @@ class TraderEngine:
                 plan.policy_reason,
             )
         elif self.settings.trading_strategy is TradingStrategy.DIRECTIONAL:
-            directional_plan = self.directional_policy.evaluate(state, result)
+            open_pos = self.account.get_position(state.symbol, state.exchange)
+            directional_plan = self.directional_policy.evaluate(
+                state,
+                result,
+                entry_thesis=None if open_pos is None else open_pos.directional_thesis,
+                directional_state=directional_state,
+            )
             candidate = directional_plan.candidate
             logger.info(
                 "DIRECTIONAL candidate=%s p_1m=%s consensus=%s conflict=%s reason=%s",
@@ -448,6 +549,10 @@ class TraderEngine:
             "decision_calculated_at_ms": float(decided_at_ms),
         }
         sample_valid, invalid_reason = research_sample_status(state, result)
+        if directional_state is not None and sample_valid:
+            required_gap = missing_required(directional_state)
+            if required_gap:
+                sample_valid, invalid_reason = False, INVALID_CONTEXT
         scalp_payload = None
         if plan is not None:
             scalp_payload = plan_payload(
@@ -469,6 +574,8 @@ class TraderEngine:
             forecast["reference_mid"] = directional_state.get("microstructure", {}).get("mid")
             forecast["reference_ts"] = now
             forecast["returns"] = (directional_state.get("price_action") or {}).get("returns")
+            forecast["research_sample_valid"] = sample_valid
+            forecast["invalid_reason"] = invalid_reason
             directional_payload = {
                 "question_version": DIRECTIONAL_QUESTION_VERSION,
                 "strategy_version": DIRECTIONAL_STRATEGY_VERSION,
@@ -476,6 +583,8 @@ class TraderEngine:
                 "feature_state": serialize_directional_state(directional_state),
                 "inspector": compact_inspector(directional_state),
                 "forecast": forecast,
+                "research_sample_valid": sample_valid,
+                "invalid_reason": invalid_reason,
                 "policy": {
                     "candidate": directional_plan.candidate.value,
                     "reason": directional_plan.policy_reason,
@@ -486,6 +595,15 @@ class TraderEngine:
                     "confirmations": directional_plan.confirmations,
                     "direction_consensus": directional_plan.direction_consensus,
                     "direction_conflict": directional_plan.direction_conflict,
+                    "entry_thesis": directional_plan.entry_thesis,
+                    "position_thesis": directional_plan.position_thesis,
+                    "signals": {
+                        "ENTRY": directional_plan.entry_signal,
+                        "HOLD": directional_plan.hold_signal,
+                        "CLOSE": directional_plan.close_signal,
+                        "REVERSE": directional_plan.reverse_signal,
+                    },
+                    "recommended": directional_plan.recommended,
                 },
                 "rolling_outcomes": {},
                 "candle_outcomes": {},
@@ -511,7 +629,15 @@ class TraderEngine:
             return
         if self.paper is not None:
             await self._maybe_execute(
-                state, risked, decision_id, now, bid, ask, plan, decided_at_ms
+                state,
+                risked,
+                decision_id,
+                now,
+                bid,
+                ask,
+                plan,
+                decided_at_ms,
+                directional_plan,
             )
             await self.repo.save_paper_account(self.account)
             await self.repo.persist_equity_snapshot(self.account, now)
@@ -526,6 +652,7 @@ class TraderEngine:
         ask: float | None,
         plan: ScalpPlan | None,
         decided_at_ms: int,
+        directional_plan: DirectionalPlan | None = None,
     ) -> None:
         assert self.paper is not None
         if risked.final_action not in EXECUTABLE_ACTIONS:
@@ -562,6 +689,7 @@ class TraderEngine:
             logger.warning("Idempotent skip for decision %s", decision_id)
             return
         report = _annotate_scalp_execution(report, plan, risked)
+        report = _annotate_directional_execution(report, directional_plan, risked)
         await self._emit("paper_order", symbol=state.symbol, exchange=state.exchange)
         await self._emit("paper_fill", symbol=state.symbol, exchange=state.exchange)
         await self.repo.persist_execution(
@@ -674,13 +802,29 @@ class TraderEngine:
         decisions: list[dict[str, Any]] = []
         trades: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
+        run_closed: list[ClosedTrade] = []
+        experiment_closed: list[ClosedTrade] = []
         db_ok = False
         try:
             await self.repo.ping()
             db_ok = True
-            decisions = await self.repo.list_recent_decisions(20)
-            trades = await self.repo.list_recent_trades(20)
-            events = await self.repo.list_recent_events(30)
+            run_filter = (
+                self.run_id
+                if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL
+                else None
+            )
+            decisions = await self.repo.list_recent_decisions(20, run_id=run_filter)
+            trades = await self.repo.list_recent_trades(20, run_id=run_filter)
+            events = await self.repo.list_recent_events(30, run_id=run_filter)
+            if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL and self.run_id:
+                run_rows = await self.repo.list_trades_for_run(self.run_id)
+                run_closed = [_closed_from_row(row) for row in run_rows]
+                experiment_closed = [
+                    _closed_from_row(row)
+                    for row in await self.repo.list_trades_for_experiment(
+                        self.settings.experiment_id
+                    )
+                ]
         except Exception:
             logger.exception("Operator snapshot database read failed")
         return build_operator_snapshot(
@@ -691,6 +835,8 @@ class TraderEngine:
             trades=trades,
             events=events,
             calibration=self.calibration_view,
+            run_closed_trades=run_closed,
+            experiment_closed_trades=experiment_closed,
         )
 
     async def _emit(
@@ -825,3 +971,81 @@ def _scalp_exit_reason(risked: RiskDecision, plan: ScalpPlan | None) -> str:
     if plan is not None and plan.policy_reason:
         return plan.policy_reason
     return risked.final_action.value
+
+
+def _directional_exit_source(risked: RiskDecision) -> str:
+    if risked.source is ActionSource.RISK_ENGINE:
+        return "RISK_ENGINE"
+    if risked.final_action in {Action.CLOSE, Action.REVERSE}:
+        return "DIRECTIONAL_POLICY"
+    return "SYSTEM"
+
+
+def _annotate_directional_execution(
+    report: ExecutionReport,
+    plan: DirectionalPlan | None,
+    risked: RiskDecision,
+) -> ExecutionReport:
+    if plan is None:
+        return report
+    opened = report.opened
+    if opened is not None and plan.entry_thesis:
+        opened.directional_thesis = dict(plan.entry_thesis)
+        primary = plan.entry_thesis.get("entry_primary_horizon")
+        seconds = HORIZON_SECONDS_BY_LABEL.get(str(primary))
+        if seconds is not None:
+            opened.entry_horizon_seconds = seconds
+    closed = report.closed
+    if closed is None:
+        return report
+    thesis = plan.position_thesis if isinstance(plan.position_thesis, dict) else {}
+    entry = plan.entry_thesis if isinstance(plan.entry_thesis, dict) else {}
+    seeded = closed.research if isinstance(closed.research, dict) else {}
+    primary = thesis.get("primary_horizon") or entry.get("entry_primary_horizon")
+    research = {
+        **seeded,
+        "entry_thesis": entry or seeded.get("entry_thesis"),
+        "close_thesis": thesis,
+        "thesis_score_entry": thesis.get("entry_thesis_score") or entry.get("entry_thesis_score"),
+        "thesis_score_close": thesis.get("current_thesis_score"),
+        "thesis_decay": thesis.get("thesis_decay"),
+        "primary_horizon": primary,
+        "primary_horizon_elapsed_multiple": thesis.get("primary_horizon_elapsed_multiple"),
+        "mfe_bps": closed.mfe_bps,
+        "mae_bps": closed.mae_bps,
+        "net_pnl": closed.net_pnl,
+        "gross_pnl": closed.gross_pnl,
+        "capture_ratio": capture_ratio(closed.mfe_bps, closed.gross_pnl_bps),
+        "profit_giveback_bps": thesis.get("profit_giveback_bps"),
+        "position_age_seconds": closed.holding_seconds,
+        "close_reason": plan.close_reason or thesis.get("reason"),
+        "reverse_reason": plan.reverse_reason,
+        "recommended": plan.recommended,
+        "exit_source": _directional_exit_source(risked),
+    }
+    if risked.source is ActionSource.RISK_ENGINE:
+        reason = risked.blocked_reason or "RISK_ENGINE"
+        source = "RISK_ENGINE"
+    else:
+        reason = (
+            plan.close_reason
+            or plan.reverse_reason
+            or closed.exit_reason
+            or "DIRECTIONAL_POLICY"
+        )
+        source = _directional_exit_source(risked)
+    research["exit_source"] = source
+    research["close_reason"] = reason
+    horizon_seconds = HORIZON_SECONDS_BY_LABEL.get(str(primary)) if primary else None
+    return replace(
+        report,
+        closed=replace(
+            closed,
+            exit_reason=reason,
+            exit_source=source,
+            research=research,
+            entry_horizon_seconds=(
+                horizon_seconds if horizon_seconds is not None else closed.entry_horizon_seconds
+            ),
+        ),
+    )

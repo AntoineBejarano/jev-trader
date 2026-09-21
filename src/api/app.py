@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from src.trader.engine import TraderEngine
@@ -28,6 +28,7 @@ def create_app(engine: TraderEngine) -> FastAPI:
             "strategy": system.get("strategy"),
             "live": "BLOCKED",
             "engine": system["engine"],
+            "strategy_running": system.get("strategy_running"),
             "database": system["database"],
             "binance_websocket": system["binance_websocket"],
             "jev": system["jev"],
@@ -36,6 +37,20 @@ def create_app(engine: TraderEngine) -> FastAPI:
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
         return await engine.operator_snapshot()
+
+    @app.post("/api/strategy/start")
+    async def strategy_start() -> dict[str, Any]:
+        result = await engine.start_strategy()
+        if not result.get("ok"):
+            raise HTTPException(status_code=409, detail=result)
+        return result
+
+    @app.post("/api/strategy/stop")
+    async def strategy_stop() -> dict[str, Any]:
+        result = await engine.stop_strategy()
+        if not result.get("ok"):
+            raise HTTPException(status_code=409, detail=result)
+        return result
 
     @app.get("/", response_class=HTMLResponse)
     async def root() -> HTMLResponse:

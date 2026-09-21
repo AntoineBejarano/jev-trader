@@ -54,6 +54,7 @@ class OpenPosition:
     entry_ask: float | None = None
     entry_slippage_cost: float = 0.0
     entry_spread_cost: float = 0.0
+    directional_thesis: dict[str, Any] | None = None
 
     def mark(self, *, bid: float, ask: float, now_ms: int | None = None) -> None:
         del now_ms
@@ -121,6 +122,7 @@ class OpenPosition:
             "entry_ask": self.entry_ask,
             "entry_slippage_cost": self.entry_slippage_cost,
             "entry_spread_cost": self.entry_spread_cost,
+            "directional_thesis": self.directional_thesis,
         }
 
     @classmethod
@@ -160,6 +162,11 @@ class OpenPosition:
             ),
             entry_slippage_cost=float(payload.get("entry_slippage_cost") or 0.0),
             entry_spread_cost=float(payload.get("entry_spread_cost") or 0.0),
+            directional_thesis=(
+                dict(payload["directional_thesis"])
+                if isinstance(payload.get("directional_thesis"), dict)
+                else None
+            ),
         )
 
 
@@ -202,6 +209,7 @@ class ClosedTrade:
     market_move_pnl: float = 0.0
     attribution_residual: float = 0.0
     funding_accounting: str = "disabled_zero"
+    research: dict[str, Any] | None = None
 
 
 @dataclass
@@ -435,6 +443,15 @@ class PaperAccount:
             market_move_pnl=market_move,
             attribution_residual=residual,
             funding_accounting=funding_accounting,
+            research=(
+                None
+                if position.directional_thesis is None
+                else {
+                    "entry_thesis": position.directional_thesis,
+                    "primary_horizon": position.directional_thesis.get("entry_primary_horizon"),
+                    "thesis_score_entry": position.directional_thesis.get("entry_thesis_score"),
+                }
+            ),
         )
         self.realized_pnl += gross
         self.fees_paid += fee

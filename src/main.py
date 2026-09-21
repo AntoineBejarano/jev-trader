@@ -44,21 +44,16 @@ async def run() -> None:
             access_log=False,
         )
     )
-    logger.info("Operator dashboard http://127.0.0.1:%s/dashboard", settings.dashboard_port)
-
-    async def serve() -> None:
-        try:
-            await server.serve()
-        finally:
-            engine.request_stop()
-
-    async def trade() -> None:
-        try:
-            await engine.run()
-        finally:
-            server.should_exit = True
-
-    await asyncio.gather(trade(), serve())
+    logger.info(
+        "Operator dashboard http://%s:%s/dashboard",
+        settings.dashboard_host,
+        settings.dashboard_port,
+    )
+    await engine.start_strategy()
+    try:
+        await server.serve()
+    finally:
+        await engine.shutdown()
 
 
 def main() -> None:

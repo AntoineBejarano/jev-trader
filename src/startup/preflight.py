@@ -37,7 +37,7 @@ async def run_preflight(settings: Settings, *, check_network: bool = True) -> No
     _require(bool(settings.symbols), "TRADING_SYMBOLS must contain at least one symbol.")
     _require(
         database_kind(settings.database_url) == "PostgreSQL",
-        "DATABASE_URL must point at local PostgreSQL for this validation.",
+        "DATABASE_URL must be PostgreSQL (local or Railway Postgres).",
     )
 
     db = Database(settings.database_url)
@@ -46,7 +46,7 @@ async def run_preflight(settings: Settings, *, check_network: bool = True) -> No
         await Repository(db).ping()
     except Exception as exc:
         raise PreflightError(
-            "PostgreSQL is not reachable. Start OrbStack Postgres and retry."
+            "PostgreSQL is not reachable. Check DATABASE_URL and that the database is running."
         ) from exc
     finally:
         await db.aclose()

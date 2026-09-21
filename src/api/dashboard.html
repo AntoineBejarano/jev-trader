@@ -105,11 +105,56 @@
       border-color: var(--line);
       color: var(--muted);
     }
+    .control-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+      align-items: center;
+    }
+    .btn {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 18px;
+      font: inherit;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+    .btn-start {
+      background: #0f3d28;
+      color: var(--ok);
+      border-color: #3dd68c;
+    }
+    .btn-stop {
+      background: #4a121c;
+      color: var(--bad);
+      border-color: #ff5d6c;
+    }
   </style>
 </head>
 <body>
   <div class="banner" id="banner">PAPER TRADING — NO REAL ORDERS — LIVE TRADING DISABLED</div>
   <main>
+    <section id="control-section">
+      <h2>CONTROL DE ESTRATEGIA</h2>
+      <div class="control-row">
+        <button type="button" id="btn-start" class="btn btn-start">Encender</button>
+        <button type="button" id="btn-stop" class="btn btn-stop">Parar</button>
+        <div>
+          <div class="k">Estado</div>
+          <div class="v" id="control-state">Cargando…</div>
+        </div>
+        <div>
+          <div class="k">Nota</div>
+          <div class="v" id="control-note">Antes solo se encendía con <code>uv run python -m src.main</code>. Parar ya no cierra el dashboard.</div>
+        </div>
+      </div>
+    </section>
     <section id="pnl-hero" class="pnl-hero pnl-flat">
       <div class="pnl-kicker">PAPER P&amp;L</div>
       <div class="pnl-label" id="pnl-label">FLAT</div>
@@ -150,6 +195,10 @@
       <h2>DIRECTION TERM STRUCTURE</h2>
       <div id="dir-term"></div>
     </section>
+    <section id="dir-thesis-section" class="hidden">
+      <h2>POSITION THESIS</h2>
+      <div id="dir-thesis" class="grid"></div>
+    </section>
     <section id="dir-candle-section" class="hidden">
       <h2>CURRENT ALIGNED CANDLES</h2>
       <div id="dir-candles"></div>
@@ -173,6 +222,10 @@
     <section id="dir-forecast-section" class="hidden">
       <h2>FORECAST QUALITY</h2>
       <div id="dir-forecast"></div>
+    </section>
+    <section id="dir-audit-section" class="hidden">
+      <h2>JEV QUESTION DEBUG</h2>
+      <div id="dir-audit"></div>
     </section>
     <section>
       <h2>POSITION</h2>
@@ -223,7 +276,7 @@
     };
     const tone = (label) => {
       const bad = ["ERROR", "STOPPED", "STALE", "BLOCKED"];
-      const warn = ["RECONNECTING", "INCOMPLETE", "WAITING"];
+      const warn = ["RECONNECTING", "INCOMPLETE", "WAITING", "STARTING", "STOPPING"];
       const ok = ["CONNECTED", "RUNNING", "HEALTHY", "READY", "PAPER", "SCALP", "DIRECTIONAL"];
       if (bad.includes(label)) return "bad";
       if (warn.includes(label)) return "warn";
@@ -241,6 +294,44 @@
     const show = (id, visible) => {
       document.getElementById(id).classList.toggle("hidden", !visible);
     };
+    let controlBusy = false;
+    const strategyErrorText = (body) => {
+      if (!body) return "Error de control";
+      const detail = body.detail;
+      if (detail && typeof detail === "object") {
+        return detail.error || detail.detail || JSON.stringify(detail);
+      }
+      if (typeof detail === "string") return detail;
+      return body.error || body.detail || "Error de control";
+    };
+    async function control(path) {
+      if (controlBusy) return;
+      controlBusy = true;
+      const startBtn = document.getElementById("btn-start");
+      const stopBtn = document.getElementById("btn-stop");
+      startBtn.disabled = true;
+      stopBtn.disabled = true;
+      try {
+        const res = await fetch(path, { method: "POST", cache: "no-store" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(strategyErrorText(body));
+        await refresh();
+      } catch (err) {
+        document.getElementById("control-note").textContent = String(err);
+      } finally {
+        controlBusy = false;
+        await refresh();
+      }
+    }
+    document.getElementById("btn-start").addEventListener("click", () => {
+      control("/api/strategy/start");
+    });
+    document.getElementById("btn-stop").addEventListener("click", () => {
+      if (!confirm("¿Parar la estrategia? El dashboard seguirá abierto y no se enviarán más órdenes PAPER.")) {
+        return;
+      }
+      control("/api/strategy/stop");
+    });
     async function refresh() {
       try {
         const res = await fetch("/api/status", { cache: "no-store" });
@@ -260,6 +351,27 @@
         const lastJev = sys.last_jev_decision || {};
         const scalp = (sys.strategy || safety.strategy) === "SCALP";
         const directional = (sys.strategy || safety.strategy) === "DIRECTIONAL";
+        const startBtn = document.getElementById("btn-start");
+        const stopBtn = document.getElementById("btn-stop");
+        const controlState = document.getElementById("control-state");
+        const controlNote = document.getElementById("control-note");
+        if (startBtn && stopBtn && controlState && controlNote && !controlBusy) {
+          startBtn.disabled = sys.can_start !== true;
+          stopBtn.disabled = sys.can_stop !== true;
+          controlState.textContent = sys.engine || "—";
+          controlState.className = "v " + tone(sys.engine);
+          if (sys.strategy_error) {
+            controlNote.textContent = sys.strategy_error;
+          } else if (sys.engine === "STOPPED") {
+            controlNote.textContent = "Estrategia parada. El dashboard sigue abierto.";
+          } else if (sys.engine === "STARTING") {
+            controlNote.textContent = "Arrancando datos de mercado y Jev…";
+          } else if (sys.engine === "STOPPING") {
+            controlNote.textContent = "Parando la estrategia…";
+          } else {
+            controlNote.textContent = "Estrategia en marcha. Parar no cierra este panel.";
+          }
+        }
         document.getElementById("banner").textContent = (safety.lines || [safety.banner]).join("\n");
         const pnl = Number(
           acct.session_net_pnl_usdt != null ? acct.session_net_pnl_usdt : acct.net_pnl
@@ -352,12 +464,14 @@
         show("latency-section", scalp || directional);
         show("calibration-section", scalp);
         show("dir-term-section", directional);
+        show("dir-thesis-section", directional);
         show("dir-candle-section", directional);
         show("dir-persist-section", directional);
         show("dir-mag-section", directional);
         show("dir-regime-section", directional);
         show("dir-features-section", directional);
         show("dir-forecast-section", directional);
+        show("dir-audit-section", directional);
         if (scalp) {
           if (!best) {
             document.getElementById("best-head").textContent = "WAITING";
@@ -496,7 +610,10 @@
           }
         }
         if (directional) {
+          const expTot = sess.experiment_total || {};
           document.getElementById("session").innerHTML = [
+            kv("Scope", sess.scope || "CURRENT RUN"),
+            kv("run_id", sess.run_id || exp.run_id || "—"),
             kv("Runtime s", fmt(sess.runtime_seconds, 0)),
             kv("Trades", fmt(sess.trades, 0)),
             kv("Wins", fmt(sess.wins, 0)),
@@ -511,6 +628,10 @@
             kv("SHORT expectancy", fmt(sess.short_expectancy, 4)),
             kv("WS disconnects", fmt(sess.ws_disconnects, 0)),
             kv("Jev failures", fmt(sess.jev_failures, 0)),
+            kv("EXPERIMENT TOTAL trades", fmt(expTot.trades, 0)),
+            kv("EXPERIMENT TOTAL wins/losses", `${fmt(expTot.wins, 0)} / ${fmt(expTot.losses, 0)}`),
+            kv("EXPERIMENT TOTAL net PnL", fmt(expTot.net_pnl, 4)),
+            kv("EXPERIMENT TOTAL drawdown", fmt(expTot.max_drawdown, 4)),
           ].join("");
           document.getElementById("latency").innerHTML = [
             kv("Jev p50 ms", fmt(lat.jev_p50_ms, 1)),
@@ -589,6 +710,35 @@
             ]),
             "Sin term structure todavía."
           );
+          const thesis = dir.position_thesis || jev.position_thesis || {};
+          const entryT = dir.entry_thesis || jev.entry_thesis || thesis;
+          const positioned = pos.open;
+          if (!positioned) {
+            document.getElementById("dir-thesis").innerHTML = `<div class="empty">FLAT — no hay tesis de posición.</div>`;
+          } else {
+            const entryP = thesis.entry_p_up || {};
+            const curP = thesis.current_p_up || {};
+            document.getElementById("dir-thesis").innerHTML = [
+              kv("recommended", thesis.recommended || jev.recommended_action || "—"),
+              kv("reason", thesis.reason || jev.hold_reason || jev.close_reason || jev.reverse_reason || "—"),
+              kv("entry primary horizon", thesis.primary_horizon || entryT.entry_primary_horizon || "—"),
+              kv("supporting", (thesis.supporting_horizons || entryT.entry_supporting_horizons || []).join(", ") || "—"),
+              kv("entry p 1m/5m/10m/30m", `${fmt(entryP["1m"], 3)} / ${fmt(entryP["5m"], 3)} / ${fmt(entryP["10m"], 3)} / ${fmt(entryP["30m"], 3)}`),
+              kv("current p 1m/5m/10m/30m", `${fmt(curP["1m"], 3)} / ${fmt(curP["5m"], 3)} / ${fmt(curP["10m"], 3)} / ${fmt(curP["30m"], 3)}`),
+              kv("entry consensus", thesis.entry_consensus || entryT.entry_consensus || "—"),
+              kv("current consensus", thesis.current_consensus || "—"),
+              kv("entry thesis score", fmt(thesis.entry_thesis_score, 3)),
+              kv("current thesis score", fmt(thesis.current_thesis_score, 3)),
+              kv("thesis decay", fmt(thesis.thesis_decay, 3)),
+              kv("primary horizon elapsed ×", fmt(thesis.primary_horizon_elapsed_multiple, 2)),
+              kv("momentum strengthening", fmt(thesis.momentum_strengthening, 3)),
+              kv("momentum weakening", fmt(thesis.momentum_weakening, 3)),
+              kv("reversal risk", fmt(thesis.reversal_risk, 3)),
+              kv("MFE bps", fmt(thesis.mfe_bps != null ? thesis.mfe_bps : pos.mfe_bps, 2)),
+              kv("MAE bps", fmt(thesis.mae_bps != null ? thesis.mae_bps : pos.mae_bps, 2)),
+              kv("profit giveback bps", fmt(thesis.profit_giveback_bps != null ? thesis.profit_giveback_bps : pos.profit_giveback_bps, 2)),
+            ].join("");
+          }
           const candles = dir.active_candles || {};
           const pCandle = dir.candle_up || jev.candle_up || {};
           document.getElementById("dir-candles").innerHTML = table(
@@ -639,19 +789,39 @@
             kv("weekend", String(regime.weekend)),
           ].join("");
           const inspector = dir.inspector || {};
-          document.getElementById("dir-features").innerHTML = Object.keys(inspector).map((group) => {
+          const coverage = dir.coverage || inspector.coverage || {};
+          const groupStatus = coverage.groups || {};
+          document.getElementById("dir-features").innerHTML = [
+            kv("REQUIRED complete", coverage.fully_populated ? "YES" : "NO", coverage.fully_populated ? "ok" : "warn"),
+            kv("r_15m", fmt(coverage.r_15m, 6)),
+            kv("r_1h", fmt(coverage.r_1h, 6)),
+            kv("missing required", (coverage.required_missing || []).join(", ") || "none"),
+            kv("missing optional", (coverage.optional_missing || []).slice(0, 8).join(", ") || "none"),
+            kv("sample valid", String(dir.research_sample_valid)),
+            kv("invalid reason", dir.invalid_reason || "—"),
+          ].join("") + Object.keys(inspector).filter((g) => g !== "coverage").map((group) => {
             const body = inspector[group];
+            const status = groupStatus[group] || "";
             const keys = body && typeof body === "object" ? Object.keys(body) : [];
-            return `<div><div class="k">${group}</div><div class="v">${keys.join(", ") || "—"}</div></div>`;
-          }).join("") || `<div class="empty">Sin features todavía.</div>`;
+            const returns = body && body.returns && typeof body.returns === "object" ? body.returns : null;
+            const extra = returns ? ` · r_15m=${fmt(returns.r_15m, 6)} r_1h=${fmt(returns.r_1h, 6)}` : "";
+            return `<div><div class="k">${group} ${status}</div><div class="v">${keys.join(", ") || "—"}${extra}</div></div>`;
+          }).join("");
           const fq = dir.forecast_quality || data.calibration || {};
           const hz = fq.horizons || {};
-          document.getElementById("dir-forecast").innerHTML = table(
-            ["H", "N", "N spaced", "Brier", "log loss", "accuracy"],
+          document.getElementById("dir-forecast").innerHTML =
+            [
+              kv("raw N", fmt(fq.n_raw_predictions, 0)),
+              kv("valid N", fmt(fq.n_valid_research, 0)),
+              kv("non-overlapping valid N", fmt(fq.n_nonoverlapping_valid, 0)),
+            ].join("") +
+            table(
+            ["H", "raw N", "valid N", "N spaced", "Brier", "log loss", "accuracy"],
             Object.keys(hz).map((key) => {
               const row = hz[key] || {};
               return [
                 key,
+                fmt(fq.n_raw_predictions, 0),
                 fmt(row.n, 0),
                 fmt(row.n_nonoverlapping, 0),
                 fmt(row.brier, 4),
@@ -660,6 +830,18 @@
               ];
             }),
             "INSUFFICIENT DATA"
+          );
+          const audit = dir.answer_audit || jev.answer_audit || [];
+          document.getElementById("dir-audit").innerHTML = table(
+            ["question_id", "horizon", "raw Jev", "parsed p", "question"],
+            audit.map((row) => [
+              row.question_id,
+              row.horizon,
+              fmt(row.raw_jev_value, 4),
+              fmt(row.parsed_probability, 4),
+              (row.question_text || "").slice(0, 80),
+            ]),
+            "Sin audit de preguntas todavía."
           );
         } else if (scalp) {
           document.getElementById("jev").innerHTML = [
@@ -760,10 +942,21 @@
           kv("Drawdown %", fmt((acct.drawdown_pct || 0) * 100, 3) + "%"),
         ].join("");
         document.getElementById("decisions").innerHTML = table(
-          scalp
+          directional
+            ? ["time", "p1m", "p5m", "p10m", "p30m", "candidate", "final", "blocked"]
+            : scalp
             ? ["time", "side", "H", "net EV", "candidate", "final", "blocked", "jev ms"]
             : ["time", "exposure", "long", "short", "evidence", "noise", "candidate", "final", "blocked"],
-          (data.recent_decisions || []).map((row) => scalp ? [
+          (data.recent_decisions || []).map((row) => directional ? [
+            fmt(row.timestamp, 0),
+            fmt(row.p_up_1m, 3),
+            fmt(row.p_up_5m, 3),
+            fmt(row.p_up_10m, 3),
+            fmt(row.p_up_30m, 3),
+            fmt(row.candidate_action, 0),
+            fmt(row.final_action, 0),
+            fmt(row.blocked_reason, 0),
+          ] : scalp ? [
             fmt(row.timestamp, 0),
             fmt(row.best_side, 0),
             fmt(row.best_horizon_seconds, 0),

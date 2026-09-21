@@ -247,6 +247,10 @@ def build_directional_state(
         missing.append("r_10m")
     if extra_returns["r_30m"] is None:
         missing.append("r_30m")
+    if merged_returns.r_15m is None:
+        missing.append("r_15m")
+    if merged_returns.r_1h is None:
+        missing.append("r_1h")
     if vol.rv_15m is None:
         missing.append("rv_15m")
     mark = buffer.mark
