@@ -52,6 +52,13 @@ def create_app(engine: TraderEngine) -> FastAPI:
             raise HTTPException(status_code=409, detail=result)
         return result
 
+    @app.post("/api/strategy/reset")
+    async def strategy_reset() -> dict[str, Any]:
+        result = await engine.reset_operator_data()
+        if not result.get("ok"):
+            raise HTTPException(status_code=409, detail=result)
+        return result
+
     @app.get("/", response_class=HTMLResponse)
     async def root() -> HTMLResponse:
         return HTMLResponse(_dashboard_html())

@@ -37,6 +37,7 @@ from src.storage.database import Database
 from src.storage.hashing import market_state_hash
 from src.storage.models import (
     PAPER_ACCOUNT_ID,
+    Base,
     DirectionalForecastRow,
     EquitySnapshotRow,
     ExperimentRunRow,
@@ -1011,6 +1012,16 @@ class Repository:
                     delete(model).where(model.experiment_id.like(like))
                 )
                 counts[key] = int(getattr(result, "rowcount", 0) or 0)
+            await session.commit()
+        return counts
+
+    async def wipe_all_operator_data(self) -> dict[str, int]:
+        """Delete every operator table. Leaves schema in place."""
+        counts: dict[str, int] = {}
+        async with self.db.session() as session:
+            for table in reversed(Base.metadata.sorted_tables):
+                result = await session.execute(delete(table))
+                counts[table.name] = int(getattr(result, "rowcount", 0) or 0)
             await session.commit()
         return counts
 

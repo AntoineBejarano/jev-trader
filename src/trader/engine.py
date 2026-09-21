@@ -260,6 +260,82 @@ class TraderEngine:
             self._strategy_task = None
             return {"ok": True, "changed": True, "engine": "STOPPED"}
 
+    async def reset_operator_data(self) -> dict[str, Any]:
+        """Stop the strategy, wipe the DB, and restore a FLAT PAPER account."""
+        stopped = await self.stop_strategy()
+        async with self._control_lock:
+            if self.lifecycle != "STOPPED":
+                return {
+                    "ok": False,
+                    "changed": False,
+                    "engine": self.lifecycle,
+                    "error": "still_running",
+                }
+            await self.db.create_all()
+            deleted = await self.repo.wipe_all_operator_data()
+            self._reset_runtime_state()
+            if self.settings.trading_mode is TradingMode.PAPER:
+                self.account = await self.repo.reset_paper_account(
+                    starting_balance=self.settings.paper_initial_balance,
+                    currency=self.settings.paper_currency,
+                )
+            logger.warning(
+                "Operator reset deleted=%s equity=%s run_id=%s",
+                deleted,
+                self.account.equity,
+                self.run_id,
+            )
+            return {
+                "ok": True,
+                "changed": True,
+                "engine": "STOPPED",
+                "stopped_strategy": bool(stopped.get("changed")),
+                "deleted": deleted,
+                "paper_equity": self.account.equity,
+                "run_id": self.run_id,
+            }
+
+    def _reset_runtime_state(self) -> None:
+        self.account = PaperAccount.new(
+            starting_balance=self.settings.paper_initial_balance,
+            currency=self.settings.paper_currency,
+            now_ms=wall_clock_ms(),
+        )
+        self.policy = DecisionPolicy(self.settings)
+        self.scalp_policy = ScalpPolicy(self.settings)
+        self.directional_policy = DirectionalPolicy(self.settings)
+        self.risk = RiskEngine(self.settings)
+        self._dir_prev_depths = {}
+        self._stale_symbols = set()
+        self.strategy_error = None
+        self._bootstrapped = False
+        self.started_at_ms = None
+        self.last_state = None
+        self.last_result = None
+        self.last_risk = None
+        self.last_plan = None
+        self.last_directional = None
+        self.last_directional_state = None
+        self.last_jev_at_ms = None
+        self.session_started_ms = None
+        self.jev_latencies = LatencyTracker()
+        self.fill_latencies = LatencyTracker()
+        self.ws_disconnects = 0
+        self.ws_recoveries = 0
+        self.positive_ev_count = 0
+        self.rejected_cost_count = 0
+        self.jev_failures = 0
+        self._warmup_ready = False
+        self._last_blocked = None
+        self._jev_was_error = False
+        self.run_id = str(uuid.uuid4())
+        self.repo.bind_run(
+            run_id=self.run_id,
+            experiment_id=self.settings.experiment_id,
+            config_hash=self.config_hash,
+        )
+        self.calibration_view = {"horizons": {}, "min_n": 20}
+
     async def shutdown(self) -> None:
         """Process teardown. Stops strategy and closes DB / Jev clients."""
         await self.stop_strategy()

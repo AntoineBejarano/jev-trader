@@ -89,6 +89,27 @@ async def test_persist_and_read_back(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wipe_all_operator_data_clears_every_table(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'wipe.db'}")
+    await db.create_all()
+    repo = Repository(db)
+    state = make_market_state(symbol="ETHUSDT", price=3501.25)
+    await repo.persist_tick(state, _ok_result())
+    await repo.record_system_event(event_type="TEST", symbol="ETHUSDT", exchange="binance_usdm")
+    counts = await repo.wipe_all_operator_data()
+    assert counts["market_snapshots"] >= 1
+    assert counts["jev_decisions"] >= 1
+    assert counts["system_events"] >= 1
+    assert await repo.list_recent_events(20) == []
+    assert await repo.list_recent_trades(20) == []
+    async with db.session() as session:
+        assert (await session.execute(select(MarketSnapshotRow))).scalars().first() is None
+        assert (await session.execute(select(JevDecisionRow))).scalars().first() is None
+        assert (await session.execute(select(SystemEventRow))).scalars().first() is None
+    await db.aclose()
+
+
+@pytest.mark.asyncio
 async def test_outcome_enrichment_uses_later_snapshots(tmp_path: Path) -> None:
     db = Database(f"sqlite:///{tmp_path / 'outcomes.db'}")
     await db.create_all()

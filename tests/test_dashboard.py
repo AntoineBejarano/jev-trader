@@ -82,6 +82,8 @@ async def test_dashboard_and_health_routes(tmp_path: Path) -> None:
         assert "Parar" in page.text
         assert "/api/strategy/start" in page.text
         assert "/api/strategy/stop" in page.text
+        assert "Resetear data" in page.text
+        assert "/api/strategy/reset" in page.text
         root = await client.get("/")
         assert root.status_code == 200
         health = await client.get("/health")
@@ -151,4 +153,67 @@ async def test_strategy_start_stop_routes_without_binance(
         assert after["can_start"] is True
         assert after["can_stop"] is False
         assert after["strategy_running"] is False
+    await engine.db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_strategy_reset_wipes_db_and_restores_flat_paper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+    await engine.db.create_all()
+    engine.account.cash = 1.0
+    engine.account.realized_pnl = -9_999.0
+    engine.last_jev_at_ms = 1
+    await engine.repo.save_paper_account(engine.account)
+    await engine.repo.record_system_event(event_type="NOISE")
+    assert await engine.repo.list_recent_events(20)
+    dirty = await engine.repo.load_paper_account()
+    assert dirty is not None
+    assert dirty.equity == pytest.approx(1.0)
+
+    async def fake_session() -> None:
+        engine.lifecycle = "RUNNING"
+        try:
+            await engine._stop.wait()
+        finally:
+            engine.lifecycle = "STOPPED"
+            engine._strategy_task = None
+
+    monkeypatch.setattr(engine, "_strategy_session", fake_session)
+    app = create_app(engine)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post("/api/strategy/start")
+        assert started.status_code == 200
+        for _ in range(50):
+            if (await client.get("/api/status")).json()["system"]["engine"] == "RUNNING":
+                break
+            await asyncio.sleep(0.02)
+
+        reset = await client.post("/api/strategy/reset")
+        assert reset.status_code == 200
+        body = reset.json()
+        assert body["ok"] is True
+        assert body["engine"] == "STOPPED"
+        assert body["stopped_strategy"] is True
+        assert body["paper_equity"] == 10_000.0
+        assert body["deleted"]["system_events"] >= 1
+        assert body["deleted"]["paper_accounts"] >= 1
+
+        status = (await client.get("/api/status")).json()
+        assert status["system"]["engine"] == "STOPPED"
+        assert status["system"]["can_start"] is True
+        assert status["system"]["can_reset"] is True
+        assert status["account"]["equity"] == 10_000.0
+        assert status["position"]["side"] == Side.FLAT.value
+        assert status["recent_trades"] == []
+        assert status["recent_events"] == []
+        assert status["recent_decisions"] == []
+    assert engine.last_jev_at_ms is None
+    assert engine.last_result is None
+    restored = await engine.repo.load_paper_account()
+    assert restored is not None
+    assert restored.equity == 10_000.0
+    assert restored.closed_trades == []
     await engine.db.aclose()

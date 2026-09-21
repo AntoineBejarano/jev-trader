@@ -135,6 +135,11 @@
       color: var(--bad);
       border-color: #ff5d6c;
     }
+    .btn-reset {
+      background: #3d2a0f;
+      color: var(--warn);
+      border-color: #f5c84c;
+    }
   </style>
 </head>
 <body>
@@ -145,6 +150,7 @@
       <div class="control-row">
         <button type="button" id="btn-start" class="btn btn-start">Encender</button>
         <button type="button" id="btn-stop" class="btn btn-stop">Parar</button>
+        <button type="button" id="btn-reset" class="btn btn-reset">Resetear data</button>
         <div>
           <div class="k">Estado</div>
           <div class="v" id="control-state">Cargando…</div>
@@ -309,8 +315,10 @@
       controlBusy = true;
       const startBtn = document.getElementById("btn-start");
       const stopBtn = document.getElementById("btn-stop");
+      const resetBtn = document.getElementById("btn-reset");
       startBtn.disabled = true;
       stopBtn.disabled = true;
+      if (resetBtn) resetBtn.disabled = true;
       try {
         const res = await fetch(path, { method: "POST", cache: "no-store" });
         const body = await res.json().catch(() => ({}));
@@ -331,6 +339,15 @@
         return;
       }
       control("/api/strategy/stop");
+    });
+    document.getElementById("btn-reset").addEventListener("click", () => {
+      if (!confirm("¿Borrar TODA la data PAPER? Trades, decisiones, forecasts, eventos y PnL. Irreversible.")) {
+        return;
+      }
+      if (!confirm("La estrategia se parará y la cuenta volverá a FLAT con el saldo inicial.")) {
+        return;
+      }
+      control("/api/strategy/reset");
     });
     async function refresh() {
       try {
@@ -353,11 +370,13 @@
         const directional = (sys.strategy || safety.strategy) === "DIRECTIONAL";
         const startBtn = document.getElementById("btn-start");
         const stopBtn = document.getElementById("btn-stop");
+        const resetBtn = document.getElementById("btn-reset");
         const controlState = document.getElementById("control-state");
         const controlNote = document.getElementById("control-note");
-        if (startBtn && stopBtn && controlState && controlNote && !controlBusy) {
+        if (startBtn && stopBtn && resetBtn && controlState && controlNote && !controlBusy) {
           startBtn.disabled = sys.can_start !== true;
           stopBtn.disabled = sys.can_stop !== true;
+          resetBtn.disabled = sys.can_reset !== true;
           controlState.textContent = sys.engine || "—";
           controlState.className = "v " + tone(sys.engine);
           if (sys.strategy_error) {

@@ -709,6 +709,7 @@ def build_operator_snapshot(
             "strategy_running": engine.strategy_running,
             "can_start": engine.lifecycle == "STOPPED",
             "can_stop": engine.lifecycle in {"STARTING", "RUNNING"},
+            "can_reset": engine.lifecycle != "STOPPING",
             "strategy_error": engine.strategy_error,
             "binance_websocket": _binance_ws_status(engine, state),
             "last_binance_update": {
