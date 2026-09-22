@@ -75,6 +75,7 @@ async def test_dashboard_and_health_routes(tmp_path: Path) -> None:
         assert "REALIZED TRADE METRICS" in page.text
         assert "Raw predictions N" in page.text
         assert "Valid research N" in page.text
+        assert "PREDICTION RESEARCH" in page.text
         assert "BEST OPPORTUNITY NOW" in page.text
         assert "OPPORTUNITY MATRIX" in page.text
         assert "CONTROL DE ESTRATEGIA" in page.text

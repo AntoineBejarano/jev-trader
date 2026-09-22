@@ -661,6 +661,7 @@ def _directional_view(engine: TraderEngine) -> dict[str, Any] | None:
         "entry_thesis": None if plan is None else plan.entry_thesis,
         "position_thesis": None if plan is None else plan.position_thesis,
         "forecast_quality": engine.calibration_view,
+        "prediction_research": engine.prediction_research_view,
     }
 
 
@@ -748,4 +749,5 @@ def build_operator_snapshot(
         "experiment": _experiment_view(engine),
         "calibration": calibration or {"horizons": {}, "min_n": 20},
         "directional": _directional_view(engine),
+        "prediction_research": getattr(engine, "prediction_research_view", {"scorecard": []}),
     }

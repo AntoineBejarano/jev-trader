@@ -140,6 +140,16 @@
       color: var(--warn);
       border-color: #f5c84c;
     }
+    .research-panel {
+      border-color: #3d5a99;
+    }
+    .research-kicker {
+      font-size: 11px;
+      letter-spacing: .2em;
+      font-weight: 800;
+      color: #93a0c0;
+      margin-bottom: 8px;
+    }
   </style>
 </head>
 <body>
@@ -228,6 +238,11 @@
     <section id="dir-forecast-section" class="hidden">
       <h2>FORECAST QUALITY</h2>
       <div id="dir-forecast"></div>
+    </section>
+    <section id="prediction-research-section" class="hidden research-panel">
+      <h2>PREDICTION RESEARCH</h2>
+      <div class="research-kicker">INDEPENDENT OF PAPER P&amp;L · FEES · RISK BLOCKS</div>
+      <div id="prediction-research"></div>
     </section>
     <section id="dir-audit-section" class="hidden">
       <h2>JEV QUESTION DEBUG</h2>
@@ -490,6 +505,7 @@
         show("dir-regime-section", directional);
         show("dir-features-section", directional);
         show("dir-forecast-section", directional);
+        show("prediction-research-section", directional);
         show("dir-audit-section", directional);
         if (scalp) {
           if (!best) {
@@ -850,6 +866,42 @@
             }),
             "INSUFFICIENT DATA"
           );
+          const research = data.prediction_research || dir.prediction_research || {};
+          const cards = research.scorecard || [];
+          document.getElementById("prediction-research").innerHTML =
+            [
+              kv("raw forecasts", fmt(research.n_raw, 0)),
+              kv("valid flag", fmt(research.n_valid_flag, 0)),
+              kv("note", research.independence || "Independent of PAPER PnL"),
+            ].join("") +
+            table(
+              ["H", "N*", "Acc", "Bal Acc", "ROC-AUC", "BSS", "ECE", "Mom", "Δ mom", "STATUS"],
+              cards.map((row) => [
+                row.horizon,
+                fmt(row.n_star, 0),
+                fmt(row.accuracy, 3),
+                fmt(row.balanced_accuracy, 3),
+                fmt(row.roc_auc, 3),
+                fmt(row.brier_skill, 3),
+                fmt(row.ece, 3),
+                fmt(row.momentum_accuracy, 3),
+                fmt(row.delta_vs_momentum, 3),
+                row.status || "—",
+              ]),
+              "INSUFFICIENT DATA"
+            ) +
+            table(
+              ["p_up bin", "N", "N*", "mean p", "realized UP", "|err|"],
+              (research.calibration_1m || []).map((row) => [
+                row.bin,
+                fmt(row.n, 0),
+                fmt(row.n_nonoverlapping, 0),
+                fmt(row.mean_predicted_p_up, 3),
+                fmt(row.realized_up_frequency, 3),
+                fmt(row.absolute_calibration_error, 3),
+              ]),
+              "No 1m calibration bins yet."
+            );
           const audit = dir.answer_audit || jev.answer_audit || [];
           document.getElementById("dir-audit").innerHTML = table(
             ["question_id", "horizon", "raw Jev", "parsed p", "question"],

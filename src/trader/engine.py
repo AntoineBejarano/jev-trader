@@ -10,6 +10,7 @@ from typing import Any
 
 from src.analytics.latency import LatencyTracker
 from src.analytics.outcomes import enrich_decision_outcomes
+from src.analytics.prediction_benchmark import dashboard_prediction_research
 from src.analytics.research_sample import (
     INVALID_CONTEXT,
     annotate_research_sample,
@@ -49,11 +50,11 @@ from src.jev.client import JevClient
 from src.jev.models import JevCallResult, JevCallStatus
 from src.market.buffer import wall_clock_ms
 from src.market.client import BinanceMarketDataAdapter
-from src.market.models import MarketState
+from src.market.models import MarketState, Side
 from src.portfolio.account import ClosedTrade, PaperAccount
 from src.risk.engine import RiskDecision, RiskEngine
 from src.storage.database import Database, database_kind
-from src.storage.repository import Repository, _closed_from_row
+from src.storage.repository import Repository, _closed_from_row, summarize_directional_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,7 @@ class TraderEngine:
         self.config_fingerprint = research_fingerprint(settings, resolved_model=None)
         self.config_hash = config_hash(self.config_fingerprint)
         self.calibration_view: dict[str, Any] = {"horizons": {}, "min_n": 20}
+        self.prediction_research_view: dict[str, Any] = {"scorecard": [], "n_raw": 0}
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -335,6 +337,7 @@ class TraderEngine:
             config_hash=self.config_hash,
         )
         self.calibration_view = {"horizons": {}, "min_n": 20}
+        self.prediction_research_view = {"scorecard": [], "n_raw": 0}
 
     async def shutdown(self) -> None:
         """Process teardown. Stops strategy and closes DB / Jev clients."""
@@ -433,7 +436,11 @@ class TraderEngine:
                 )
             if self.settings.trading_mode is TradingMode.PAPER:
                 restored = await self.repo.load_paper_account()
-                if restored is not None:
+                stored_experiment = await self.repo.paper_account_experiment_id()
+                if (
+                    restored is not None
+                    and stored_experiment == self.settings.experiment_id
+                ):
                     self.account = restored
                     open_sides = [
                         f"{pos.exchange}:{pos.symbol}:{pos.side.value}"
@@ -446,7 +453,18 @@ class TraderEngine:
                         open_sides or "FLAT",
                     )
                 else:
-                    await self.repo.save_paper_account(self.account)
+                    if restored is not None:
+                        logger.info(
+                            "Fresh paper account for experiment %s "
+                            "(previous payload experiment=%s). "
+                            "Research rows are not deleted.",
+                            self.settings.experiment_id,
+                            stored_experiment,
+                        )
+                    self.account = await self.repo.reset_paper_account(
+                        starting_balance=self.settings.paper_initial_balance,
+                        currency=self.settings.paper_currency,
+                    )
             self._bootstrapped = True
         await self.repo.record_system_event(
             event_type="ENGINE_START",
@@ -685,6 +703,11 @@ class TraderEngine:
                 "candle_outcomes": {},
                 "persistence_outcomes": {},
                 "counterfactuals": {},
+                "execution": {
+                    "position_open": state.position.side is not Side.FLAT,
+                    "risk_blocked": risked.blocked_reason is not None,
+                    "risk_block_reason": risked.blocked_reason,
+                },
             }
         try:
             decision_id = await self.repo.persist_tick(
@@ -858,9 +881,9 @@ class TraderEngine:
                 if dir_updated:
                     logger.info("Enriched %s directional forecasts", dir_updated)
                 if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL:
-                    self.calibration_view = await self.repo.directional_calibration_summary(
-                        self.run_id
-                    )
+                    dir_rows = await self.repo.list_directional_forecasts(self.run_id)
+                    self.calibration_view = summarize_directional_calibration(dir_rows)
+                    self.prediction_research_view = dashboard_prediction_research(dir_rows)
                 else:
                     self.calibration_view = await self.repo.calibration_summary(self.run_id)
             except Exception:

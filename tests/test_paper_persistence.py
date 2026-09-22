@@ -156,3 +156,48 @@ async def test_duplicate_persist_does_not_double_open(tmp_path: Path) -> None:
     assert second.skipped_duplicate is True
     assert account.open_position_count == 1
     await db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_experiment_resets_paper_without_deleting_research(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'oos.db'}")
+    await db.create_all()
+    repo = Repository(db)
+    repo.bind_run(run_id="run-002", experiment_id="directional-v1-manual-002", config_hash="h")
+    stale = fresh_account()
+    stale.consecutive_losses = 5
+    stale.cash = 9_000.0
+    stale.realized_pnl = -10.0
+    await repo.save_paper_account(stale)
+    await repo.persist_tick(
+        make_market_state(symbol="BTCUSDT", price=100.0),
+        _ok_result("BTCUSDT"),
+        directional_payload={
+            "forecast": {"p_up": {"1m": 0.3}, "research_sample_valid": True},
+            "policy": {"candidate": "NO_ACTION"},
+            "research_sample_valid": True,
+        },
+    )
+    assert await repo.paper_account_experiment_id() == "directional-v1-manual-002"
+    assert len(await repo.list_directional_forecasts("run-002")) == 1
+
+    repo.bind_run(
+        run_id="run-003", experiment_id="directional-v1-prediction-003", config_hash="h3"
+    )
+    assert await repo.paper_account_experiment_id() != "directional-v1-prediction-003"
+    fresh = await repo.reset_paper_account(starting_balance=10_000.0, currency="USDT")
+    assert fresh.consecutive_losses == 0
+    assert fresh.equity == pytest.approx(10_000.0)
+    assert fresh.open_position_count == 0
+    assert await repo.paper_account_experiment_id() == "directional-v1-prediction-003"
+    leftover = await repo.list_directional_forecasts("run-002")
+    assert len(leftover) == 1
+    assert leftover[0].forecast["p_up"]["1m"] == 0.3
+
+    fresh.consecutive_losses = 2
+    await repo.save_paper_account(fresh)
+    restored = await repo.load_paper_account()
+    assert restored is not None
+    assert await repo.paper_account_experiment_id() == "directional-v1-prediction-003"
+    assert restored.consecutive_losses == 2
+    await db.aclose()

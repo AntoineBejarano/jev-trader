@@ -641,6 +641,8 @@ class Repository:
 
     async def save_paper_account(self, account: PaperAccount) -> None:
         payload = account.to_payload()
+        if self.experiment_id:
+            payload["experiment_id"] = self.experiment_id
         async with self.db.session() as session:
             row = await session.get(PaperAccountRow, PAPER_ACCOUNT_ID)
             if row is None:
@@ -685,6 +687,21 @@ class Repository:
             account.closed_trades = [_closed_from_row(item) for item in trades]
             return account
 
+    async def paper_account_experiment_id(self) -> str | None:
+        async with self.db.session() as session:
+            row = await session.get(PaperAccountRow, PAPER_ACCOUNT_ID)
+            if row is None or not isinstance(row.payload, dict):
+                return None
+            raw = row.payload.get("experiment_id")
+            return str(raw) if raw else None
+
+    async def clear_open_positions(self) -> int:
+        """Drop live PositionRow ladder only. Never deletes trades or forecasts."""
+        async with self.db.session() as session:
+            result = await session.execute(delete(PositionRow))
+            await session.commit()
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def reset_paper_account(
         self,
         *,
@@ -692,12 +709,13 @@ class Repository:
         currency: str = "USDT",
         now_ms: int | None = None,
     ) -> PaperAccount:
-        """Replace the singleton PAPER account. Does not delete SCALP trade rows."""
+        """Replace the singleton PAPER account. Does not delete research or trade rows."""
         account = PaperAccount.new(
             starting_balance=starting_balance,
             currency=currency,
             now_ms=now_ms if now_ms is not None else wall_clock_ms(),
         )
+        await self.clear_open_positions()
         await self.save_paper_account(account)
         return account
 
@@ -843,7 +861,7 @@ class Repository:
         return summarize_run_calibration(rows)
 
     async def list_directional_forecasts(
-        self, run_id: str | None = None
+        self, run_id: str | None = None, *, experiment_id: str | None = None
     ) -> list[DirectionalForecastRow]:
         async with self.db.session() as session:
             stmt = select(DirectionalForecastRow).order_by(
@@ -851,6 +869,8 @@ class Repository:
             )
             if run_id:
                 stmt = stmt.where(DirectionalForecastRow.run_id == run_id)
+            if experiment_id:
+                stmt = stmt.where(DirectionalForecastRow.experiment_id == experiment_id)
             return list((await session.execute(stmt)).scalars().all())
 
     async def count_directional(self, experiment_id: str | None = None) -> dict[str, int]:
