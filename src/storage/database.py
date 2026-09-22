@@ -85,11 +85,21 @@ class Database:
             connect_args["timeout"] = 30
         elif self.url.startswith("postgresql+") and postgres_requires_ssl(url):
             connect_args["ssl"] = True
-        self.engine: AsyncEngine = create_async_engine(
-            self.url,
-            echo=False,
-            connect_args=connect_args,
-        )
+        engine_kwargs: dict[str, object] = {
+            "echo": False,
+            "connect_args": connect_args,
+        }
+        if self.url.startswith("postgresql+"):
+            engine_kwargs.update(
+                {
+                    "pool_size": 10,
+                    "max_overflow": 20,
+                    "pool_pre_ping": True,
+                    "pool_timeout": 10,
+                    "pool_recycle": 300,
+                }
+            )
+        self.engine: AsyncEngine = create_async_engine(self.url, **engine_kwargs)
         if self.url.startswith("sqlite+"):
             event.listen(self.engine.sync_engine, "connect", _sqlite_on_connect)
         self.session_factory = async_sessionmaker(

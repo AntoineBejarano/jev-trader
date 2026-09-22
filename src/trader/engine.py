@@ -905,25 +905,26 @@ class TraderEngine:
         experiment_closed: list[ClosedTrade] = []
         db_ok = False
         try:
-            await self.repo.ping()
-            db_ok = True
-            run_filter = (
-                self.run_id
-                if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL
-                else None
-            )
-            decisions = await self.repo.list_recent_decisions(20, run_id=run_filter)
-            trades = await self.repo.list_recent_trades(20, run_id=run_filter)
-            events = await self.repo.list_recent_events(30, run_id=run_filter)
-            if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL and self.run_id:
-                run_rows = await self.repo.list_trades_for_run(self.run_id)
-                run_closed = [_closed_from_row(row) for row in run_rows]
-                experiment_closed = [
-                    _closed_from_row(row)
-                    for row in await self.repo.list_trades_for_experiment(
-                        self.settings.experiment_id
-                    )
-                ]
+            async with asyncio.timeout(5):
+                await self.repo.ping()
+                db_ok = True
+                run_filter = (
+                    self.run_id
+                    if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL
+                    else None
+                )
+                decisions = await self.repo.list_recent_decisions(20, run_id=run_filter)
+                trades = await self.repo.list_recent_trades(20, run_id=run_filter)
+                events = await self.repo.list_recent_events(30, run_id=run_filter)
+                if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL and self.run_id:
+                    run_rows = await self.repo.list_trades_for_run(self.run_id)
+                    run_closed = [_closed_from_row(row) for row in run_rows]
+                    experiment_closed = [
+                        _closed_from_row(row)
+                        for row in await self.repo.list_trades_for_experiment(
+                            self.settings.experiment_id
+                        )
+                    ]
         except Exception:
             logger.exception("Operator snapshot database read failed")
         return build_operator_snapshot(

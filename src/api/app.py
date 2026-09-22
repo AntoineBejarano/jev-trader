@@ -20,18 +20,14 @@ def create_app(engine: TraderEngine) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        snapshot = await engine.operator_snapshot()
-        system = snapshot["system"]
+        """Liveness only. Must not touch Postgres — /api/status already does."""
         return {
-            "ok": system["engine"] == "RUNNING" and system["database"] == "CONNECTED",
-            "trading_mode": system["trading_mode"],
-            "strategy": system.get("strategy"),
+            "ok": engine.lifecycle == "RUNNING",
+            "trading_mode": engine.settings.trading_mode.value,
+            "strategy": engine.settings.trading_strategy.value,
             "live": "BLOCKED",
-            "engine": system["engine"],
-            "strategy_running": system.get("strategy_running"),
-            "database": system["database"],
-            "binance_websocket": system["binance_websocket"],
-            "jev": system["jev"],
+            "engine": engine.lifecycle,
+            "strategy_running": engine.strategy_running,
         }
 
     @app.get("/api/status")
