@@ -18,7 +18,7 @@ from src.analytics.research_sample import (
 )
 from src.api.snapshot import build_operator_snapshot
 from src.config.settings import Settings, TradingMode, TradingStrategy
-from src.decision.actions import EXECUTABLE_ACTIONS, Action, ActionSource
+from src.decision.actions import EXECUTABLE_ACTIONS, EXECUTABLE_OPENS, Action, ActionSource
 from src.decision.barriers import BarrierPlanner
 from src.decision.policy import DecisionPolicy
 from src.decision.scalp import ScalpPlan, ScalpPolicy, plan_payload
@@ -203,6 +203,7 @@ class TraderEngine:
         self.config_hash = config_hash(self.config_fingerprint)
         self.calibration_view: dict[str, Any] = {"horizons": {}, "min_n": 20}
         self.prediction_research_view: dict[str, Any] = {"scorecard": [], "n_raw": 0}
+        self.paper_persistence = "HEALTHY"
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -338,6 +339,7 @@ class TraderEngine:
         )
         self.calibration_view = {"horizons": {}, "min_n": 20}
         self.prediction_research_view = {"scorecard": [], "n_raw": 0}
+        self.paper_persistence = "HEALTHY"
 
     async def shutdown(self) -> None:
         """Process teardown. Stops strategy and closes DB / Jev clients."""
@@ -738,8 +740,26 @@ class TraderEngine:
                 decided_at_ms,
                 directional_plan,
             )
+            await self._persist_paper_runtime(now)
+
+    async def _persist_paper_runtime(self, now: int) -> bool:
+        """Keep the decision loop alive if PAPER account writes fail."""
+        try:
             await self.repo.save_paper_account(self.account)
             await self.repo.persist_equity_snapshot(self.account, now)
+        except Exception:
+            if self.paper_persistence != "DEGRADED":
+                logger.exception(
+                    "PAPER persistence DEGRADED — research continues; new entries blocked"
+                )
+                await self._emit("paper_persistence_degraded", level="WARNING")
+            self.paper_persistence = "DEGRADED"
+            return False
+        if self.paper_persistence == "DEGRADED":
+            logger.info("PAPER persistence recovered HEALTHY")
+            await self._emit("paper_persistence_recovered")
+        self.paper_persistence = "HEALTHY"
+        return True
 
     async def _maybe_execute(
         self,
@@ -755,6 +775,17 @@ class TraderEngine:
     ) -> None:
         assert self.paper is not None
         if risked.final_action not in EXECUTABLE_ACTIONS:
+            return
+        if (
+            risked.final_action in EXECUTABLE_OPENS
+            and self.paper_persistence == "DEGRADED"
+        ):
+            logger.warning(
+                "Skipping %s for %s:%s — PAPER persistence DEGRADED",
+                risked.final_action.value,
+                state.exchange,
+                state.symbol,
+            )
             return
         if bid is None or ask is None or not self.adapter.runtime(state.symbol).book.valid:
             logger.warning(

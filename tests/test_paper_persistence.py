@@ -201,3 +201,41 @@ async def test_new_experiment_resets_paper_without_deleting_research(tmp_path: P
     assert await repo.paper_account_experiment_id() == "directional-v1-prediction-003"
     assert restored.consecutive_losses == 2
     await db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_paper_persist_timeout_marks_degraded_and_blocks_opens(tmp_path: Path) -> None:
+    from src.config.settings import Settings
+    from src.decision.actions import ActionSource
+    from src.risk.engine import RiskDecision
+    from src.trader.engine import TraderEngine
+
+    engine = TraderEngine(
+        Settings(
+            trading_mode="PAPER",
+            database_url=f"sqlite:///{tmp_path / 'degraded.db'}",
+            _env_file=None,
+        )
+    )
+    await engine.db.create_all()
+    orig_save = engine.repo.save_paper_account
+    orig_snap = engine.repo.persist_equity_snapshot
+
+    async def boom(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError()
+
+    engine.repo.save_paper_account = boom  # type: ignore[method-assign]
+    engine.repo.persist_equity_snapshot = boom  # type: ignore[method-assign]
+    assert await engine._persist_paper_runtime(1) is False
+    assert engine.paper_persistence == "DEGRADED"
+
+    state = make_market_state(price=100.0, bid=100.0, ask=100.10)
+    risk = RiskDecision(Action.OPEN_LONG, Action.OPEN_LONG, None, ActionSource.JEV)
+    await engine._maybe_execute(state, risk, "dec-degraded", 1, 100.0, 100.10, None, 1, None)
+    assert engine.account.open_position_count == 0
+
+    engine.repo.save_paper_account = orig_save
+    engine.repo.persist_equity_snapshot = orig_snap
+    assert await engine._persist_paper_runtime(2) is True
+    assert engine.paper_persistence == "HEALTHY"
+    await engine.db.aclose()

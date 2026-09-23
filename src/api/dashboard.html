@@ -460,6 +460,7 @@
           kv("Last Jev decision", `${fmt(lastJev.timestamp, 0)} (${ago(lastJev.seconds_ago)})`),
           kv("Database", sys.database, tone(sys.database === "CONNECTED" ? "READY" : "ERROR")),
           kv("Database type", sys.database_type),
+          kv("PAPER persistence", sys.paper_persistence || "HEALTHY", tone(sys.paper_persistence === "DEGRADED" ? "ERROR" : "READY")),
           kv("Warmup", sys.warmup, tone(sys.warmup)),
           kv("Warmup progress", sys.warmup_progress),
           kv("Trading allowed", String(sys.trading_allowed)),

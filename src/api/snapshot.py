@@ -724,6 +724,7 @@ def build_operator_snapshot(
             },
             "database": "CONNECTED" if db_ok else "ERROR",
             "database_type": database_kind(engine.settings.database_url),
+            "paper_persistence": getattr(engine, "paper_persistence", "HEALTHY"),
             "warmup": warmup,
             "warmup_progress": warmup_progress,
             "trading_allowed": trading_allowed,
