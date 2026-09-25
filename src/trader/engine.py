@@ -204,6 +204,10 @@ class TraderEngine:
         self.calibration_view: dict[str, Any] = {"horizons": {}, "min_n": 20}
         self.prediction_research_view: dict[str, Any] = {"scorecard": [], "n_raw": 0}
         self.paper_persistence = "HEALTHY"
+        self._cached_run_trades: list[ClosedTrade] | None = None
+        self._cached_experiment_trades: list[ClosedTrade] | None = None
+        self._last_history_seed_ms: int | None = None
+        self._research_refresh_at_ms: int = 0
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -340,6 +344,10 @@ class TraderEngine:
         self.calibration_view = {"horizons": {}, "min_n": 20}
         self.prediction_research_view = {"scorecard": [], "n_raw": 0}
         self.paper_persistence = "HEALTHY"
+        self._cached_run_trades = None
+        self._cached_experiment_trades = None
+        self._last_history_seed_ms = None
+        self._research_refresh_at_ms = 0
 
     async def shutdown(self) -> None:
         """Process teardown. Stops strategy and closes DB / Jev clients."""
@@ -523,6 +531,17 @@ class TraderEngine:
             except TimeoutError:
                 continue
 
+    async def _refresh_price_history(self, now_ms: int) -> None:
+        """Re-seed kline mids when r_1h is missing. Does not change required-context rules."""
+        last = self._last_history_seed_ms
+        if last is not None and now_ms - last < 60_000:
+            return
+        self._last_history_seed_ms = now_ms
+        try:
+            await self.adapter.bootstrap_price_history()
+        except Exception:
+            logger.warning("Price-history re-seed failed", exc_info=True)
+
     async def _tick_symbol(self, symbol: str, now: int) -> None:
         runtime = self.adapter.runtime(symbol)
         bid = runtime.book.best_bid
@@ -569,6 +588,16 @@ class TraderEngine:
                 cross=self.cross_market.payload,
                 prev_depths=self._dir_prev_depths.get(symbol),
             )
+            returns = (directional_state.get("price_action") or {}).get("returns") or {}
+            if returns.get("r_1h") is None:
+                await self._refresh_price_history(now)
+                directional_state = build_directional_state(
+                    buffer=runtime.buffer,
+                    book=runtime.book,
+                    now_ms=now,
+                    cross=self.cross_market.payload,
+                    prev_depths=self._dir_prev_depths.get(symbol),
+                )
             self._dir_prev_depths[symbol] = runtime_depths
             result = await self.jev.decide(
                 state, forecast_state=serialize_directional_state(directional_state)
@@ -912,15 +941,18 @@ class TraderEngine:
                 if dir_updated:
                     logger.info("Enriched %s directional forecasts", dir_updated)
                 if self.settings.trading_strategy is TradingStrategy.DIRECTIONAL:
-                    dir_rows = await self.repo.list_directional_forecasts(self.run_id)
-                    self.calibration_view = summarize_directional_calibration(dir_rows)
-                    self.prediction_research_view = dashboard_prediction_research(dir_rows)
+                    now = wall_clock_ms()
+                    if now - self._research_refresh_at_ms >= 30_000:
+                        dir_rows = await self.repo.list_directional_forecasts(self.run_id)
+                        self.calibration_view = summarize_directional_calibration(dir_rows)
+                        self.prediction_research_view = dashboard_prediction_research(dir_rows)
+                        self._research_refresh_at_ms = now
                 else:
                     self.calibration_view = await self.repo.calibration_summary(self.run_id)
             except Exception:
                 logger.exception("Outcome enrichment failed")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=5.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=15.0)
             except TimeoutError:
                 continue
 
@@ -932,8 +964,8 @@ class TraderEngine:
         decisions: list[dict[str, Any]] = []
         trades: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
-        run_closed: list[ClosedTrade] = []
-        experiment_closed: list[ClosedTrade] = []
+        run_closed: list[ClosedTrade] | None = None
+        experiment_closed: list[ClosedTrade] | None = None
         db_ok = False
         try:
             async with asyncio.timeout(5):
@@ -956,8 +988,12 @@ class TraderEngine:
                             self.settings.experiment_id
                         )
                     ]
+                    self._cached_run_trades = run_closed
+                    self._cached_experiment_trades = experiment_closed
         except Exception:
             logger.exception("Operator snapshot database read failed")
+            run_closed = self._cached_run_trades
+            experiment_closed = self._cached_experiment_trades
         return build_operator_snapshot(
             self,
             now_ms=now_ms,

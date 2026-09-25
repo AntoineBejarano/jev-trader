@@ -7,8 +7,10 @@ from pathlib import Path
 import httpx
 import pytest
 from src.api.app import create_app
+from src.api.snapshot import _session_view
 from src.config.settings import Settings
 from src.market.models import Side
+from src.portfolio.account import ClosedTrade
 from src.trader.engine import TraderEngine
 
 
@@ -217,4 +219,91 @@ async def test_strategy_reset_wipes_db_and_restores_flat_paper(
     assert restored is not None
     assert restored.equity == 10_000.0
     assert restored.closed_trades == []
+    await engine.db.aclose()
+
+
+def _closed_trade(net_pnl: float = -1.5) -> ClosedTrade:
+    return ClosedTrade(
+        symbol="BTCUSDT",
+        exchange="binance_usdm",
+        side=Side.LONG,
+        quantity=0.01,
+        entry_price=100.0,
+        exit_price=99.0,
+        entry_notional=1000.0,
+        entry_timestamp_ms=1,
+        exit_timestamp_ms=2,
+        holding_seconds=10.0,
+        gross_pnl=net_pnl,
+        entry_fee=0.0,
+        exit_fee=0.0,
+        total_fees=0.0,
+        slippage_cost=0.0,
+        funding_cost=0.0,
+        net_pnl=net_pnl,
+        gross_pnl_bps=-15.0,
+        net_pnl_bps=-15.0,
+        mfe_bps=0.0,
+        mae_bps=0.0,
+        entry_jev_decision_id=None,
+        exit_jev_decision_id=None,
+        entry_source="JEV",
+        exit_source="JEV",
+    )
+
+
+def test_session_view_keeps_in_memory_trades_when_db_lists_are_none(tmp_path: Path) -> None:
+    settings = Settings(
+        trading_mode="PAPER",
+        trading_strategy="DIRECTIONAL",
+        database_url=f"sqlite:///{tmp_path / 'session.db'}",
+        openrouter_api_key="sk-secret-must-not-leak",
+        _env_file=None,
+    )
+    engine = TraderEngine(settings)
+    engine.account.closed_trades.append(_closed_trade(-3.93))
+    view = _session_view(engine, now_ms=1_000, run_trades=None, experiment_trades=None)
+    assert view["trades"] == 1
+    assert view["net_pnl"] == pytest.approx(-3.93)
+    assert view["experiment_total"]["trades"] == 1
+
+
+def test_session_view_empty_db_list_is_real_zero(tmp_path: Path) -> None:
+    settings = Settings(
+        trading_mode="PAPER",
+        trading_strategy="DIRECTIONAL",
+        database_url=f"sqlite:///{tmp_path / 'session-zero.db'}",
+        openrouter_api_key="sk-secret-must-not-leak",
+        _env_file=None,
+    )
+    engine = TraderEngine(settings)
+    engine.account.closed_trades.append(_closed_trade())
+    view = _session_view(engine, now_ms=1_000, run_trades=[], experiment_trades=[])
+    assert view["trades"] == 0
+    assert view["experiment_total"]["trades"] == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_snapshot_reuses_cached_experiment_totals(tmp_path: Path) -> None:
+    settings = Settings(
+        trading_mode="PAPER",
+        trading_strategy="DIRECTIONAL",
+        database_url=f"sqlite:///{tmp_path / 'cache.db'}",
+        openrouter_api_key="sk-secret-must-not-leak",
+        _env_file=None,
+    )
+    engine = TraderEngine(settings)
+    await engine.db.create_all()
+    engine._cached_experiment_trades = [_closed_trade(-19.50), _closed_trade(1.0)]
+    engine._cached_run_trades = [_closed_trade(-3.93)]
+
+    async def boom() -> None:
+        raise TimeoutError("snapshot blocked")
+
+    engine.repo.ping = boom  # type: ignore[method-assign]
+    payload = await engine.operator_snapshot()
+    assert payload["system"]["database"] == "ERROR"
+    assert payload["session"]["trades"] == 1
+    assert payload["session"]["experiment_total"]["trades"] == 2
+    assert payload["session"]["experiment_total"]["net_pnl"] == pytest.approx(-18.50)
     await engine.db.aclose()

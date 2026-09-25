@@ -581,6 +581,32 @@ def test_r_1h_is_required_and_seeded_history_survives_eviction() -> None:
     assert missing_required({"microstructure": {}})
 
 
+def test_live_overwrite_keeps_seeded_flag_for_r_1h() -> None:
+    from src.features.returns import compute_returns
+    from src.market.buffer import MarketBuffer
+    from src.market.history import seed_buffer_from_klines
+
+    now = 3_600_000 * 3
+    buffer = MarketBuffer(
+        symbol="BTCUSDT", exchange="binance_usdm", history_ms=3_600_000, clock=lambda: now
+    )
+    klines = []
+    start = now - 120 * 60_000
+    for i in range(120):
+        open_time = start + i * 60_000
+        close_time = open_time + 59_999
+        px = 100.0 + i * 0.01
+        klines.append([open_time, px, px, px, px + 0.01, 1.0, close_time])
+    seed_buffer_from_klines(buffer, klines)
+    last_ts = buffer.mids[-1].ts_ms
+    buffer.record_mid(102.0, last_ts + 50)
+    assert buffer.mids[-1].seeded is True
+    stamps, values = buffer.mids_as_lists()
+    assert stamps[0] <= now - 3_600_000
+    returns = compute_returns(stamps, values, now, 102.0)
+    assert returns.r_1h is not None
+
+
 @pytest.mark.asyncio
 async def test_current_run_trades_are_not_mixed(tmp_path: Path) -> None:
     db = Database(f"sqlite:///{tmp_path / 'scope.db'}")

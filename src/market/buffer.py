@@ -75,7 +75,11 @@ class MarketBuffer:
             # Keep the bucket's original timestamp. Updating it to `ts` would
             # reset the interval on every bookTicker and collapse the series
             # to one sample during liquid BTC markets.
-            self.mids[-1] = MidSample(ts_ms=self.mids[-1].ts_ms, mid=mid)
+            self.mids[-1] = MidSample(
+                ts_ms=self.mids[-1].ts_ms,
+                mid=mid,
+                seeded=self.mids[-1].seeded,
+            )
             self._evict(ts)
             return
         self.mids.append(MidSample(ts_ms=ts, mid=mid, seeded=False))

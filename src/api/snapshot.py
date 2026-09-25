@@ -583,10 +583,16 @@ def _session_view(
 ) -> dict[str, Any]:
     directional = engine.settings.trading_strategy is TradingStrategy.DIRECTIONAL
     if directional:
-        current = _session_metrics(engine, now_ms, run_trades or [])
+        current_trades = (
+            run_trades if run_trades is not None else engine.account.closed_trades
+        )
+        current = _session_metrics(engine, now_ms, current_trades)
         current["scope"] = "CURRENT RUN"
         current["run_id"] = engine.run_id
-        experiment = _session_metrics(engine, now_ms, experiment_trades or [])
+        experiment_source = (
+            experiment_trades if experiment_trades is not None else current_trades
+        )
+        experiment = _session_metrics(engine, now_ms, experiment_source)
         experiment["scope"] = "EXPERIMENT TOTAL"
         experiment["experiment_id"] = engine.settings.experiment_id
         current["experiment_total"] = {

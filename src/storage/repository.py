@@ -900,7 +900,10 @@ class Repository:
             pending = list(
                 (
                     await session.execute(
-                        select(DirectionalForecastRow).where(DirectionalForecastRow.mature.is_(False))
+                        select(DirectionalForecastRow)
+                        .where(DirectionalForecastRow.mature.is_(False))
+                        .order_by(DirectionalForecastRow.timestamp_ms.asc())
+                        .limit(40)
                     )
                 )
                 .scalars()
